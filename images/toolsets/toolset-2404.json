@@ -108,32 +108,43 @@
     },
     "java": {
         "default": "17",
-        "versions": ["11", "17", "21"],
+        "versions": [
+            "11",
+            "17",
+            "21"
+        ],
         "maven": "3.9.14"
     },
     "clang": {
-        "versions": ["17", "18"],
+        "versions": [
+            "17",
+            "18"
+        ],
         "default_version": "18"
     },
     "gcc": {
-        "versions": ["g++-13", "g++-14"]
+        "versions": [
+            "g++-13",
+            "g++-14"
+        ]
     },
     "node": {
         "default": "20"
     },
-    "node_modules": [
-        { "name": "typescript", "command": "tsc" },
-        { "name": "yarn", "command": "yarn" },
-        { "name": "webpack", "command": "webpack" },
-        { "name": "webpack-cli", "command": "webpack-cli" },
-        { "name": "lerna", "command": "lerna" },
-        { "name": "n", "command": "n" }
-    ],
+    "node_modules": [],
     "pipx": [
-        { "package": "yamllint", "cmd": "yamllint" },
-        { "package": "ansible-core", "cmd": "ansible" }
+        {
+            "package": "yamllint",
+            "cmd": "yamllint"
+        },
+        {
+            "package": "ansible-core",
+            "cmd": "ansible"
+        }
     ],
     "rubygems": [
-        { "name": "fastlane" }
+        {
+            "name": "fastlane"
+        }
     ]
 }

@@ -120,6 +120,7 @@ build {
       "scripts/build/install-git.sh",
       "scripts/build/install-git-lfs.sh",
       "scripts/build/install-github-cli.sh",
+      "scripts/build/install-nodejs.sh",
       "scripts/build/configure-dpkg.sh",
       "scripts/build/install-yq.sh",
       "scripts/build/install-zstd.sh",

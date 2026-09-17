@@ -102,6 +102,7 @@ jobs:
             gcloud --version | head -1 && echo 'PASS: gcloud'
             git --version && echo 'PASS: git'
             gh --version | head -1 && echo 'PASS: gh'
+            node --version && npm --version && echo 'PASS: node and npm'
             sudo -u runner docker run --detach --rm --name mongo-smoke mongo:8.0 >/dev/null
             sleep 20
             sudo -u runner docker logs mongo-smoke 2>&1 | grep -q 'Waiting for connections' && echo 'PASS: mongod starts on this kernel as the runner user'
