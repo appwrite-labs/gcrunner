@@ -115,13 +115,13 @@ jobs:
           gcloud compute instances delete "smoke-test-${{ matrix.family }}-${{ github.run_id }}" \
             --zone="${{ vars.PACKER_ZONE }}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet || true
 
-      - name: Delete old images
+      - name: Delete images older than the newest three
         run: |
           OLD_IMAGES=$(gcloud compute images list \
             --project="${{ vars.PACKER_PROJECT_ID }}" \
             --filter="family=gcrunner-${{ matrix.family }}" \
             --sort-by="~creationTimestamp" \
-            --format="value(name)" | tail -n +2)
+            --format="value(name)" | tail -n +4)
           for img in $OLD_IMAGES; do
             echo "Deleting old image: $img"
             gcloud compute images delete "$img" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet
