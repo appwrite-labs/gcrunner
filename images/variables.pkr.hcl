@@ -79,3 +79,10 @@ variable "toolset_file" {
   type    = string
   default = "toolsets/toolset-2404.json"
 }
+
+variable "access_token" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "OAuth access token for the build (no ADC on the build host)"
+}

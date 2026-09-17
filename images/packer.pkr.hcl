@@ -22,6 +22,7 @@ source "googlecompute" "runner" {
   image_description       = var.image_description
   machine_type            = var.machine_type
   disk_size               = var.disk_size
+  access_token            = var.access_token
   ssh_username            = "packer"
   tags                    = ["packer"]
 }
@@ -115,23 +116,12 @@ build {
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
     scripts = [
       "scripts/build/install-apt-common.sh",
-      "scripts/build/install-clang.sh",
-      "scripts/build/install-cmake.sh",
-      "scripts/build/install-gcc-compilers.sh",
       "scripts/build/install-git.sh",
       "scripts/build/install-git-lfs.sh",
       "scripts/build/install-github-cli.sh",
-      "scripts/build/install-java-tools.sh",
-      "scripts/build/install-nvm.sh",
-      "scripts/build/install-nodejs.sh",
-      "scripts/build/install-ruby.sh",
-      "scripts/build/install-rust.sh",
       "scripts/build/configure-dpkg.sh",
       "scripts/build/install-yq.sh",
-      "scripts/build/install-python.sh",
-      "scripts/build/install-pipx-packages.sh",
       "scripts/build/install-zstd.sh",
-      "scripts/build/install-ninja.sh",
     ]
   }
 
@@ -142,6 +132,18 @@ build {
     environment_vars = ["HELPER_SCRIPTS=${var.helper_script_folder}", "INSTALLER_SCRIPT_FOLDER=${var.installer_script_folder}"]
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
     scripts          = ["scripts/build/install-docker.sh"]
+  }
+
+  # Jobs drive Docker as the runner user without sudo.
+  provisioner "shell" {
+    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
+    inline          = ["usermod -aG docker runner"]
+  }
+
+  # MongoDB 8.0 refuses kernels 6.19 to 7.0.13 (SERVER-121912); boot the GA 6.8 kernel.
+  provisioner "shell" {
+    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
+    script          = "scripts/gcrunner/pin-kernel.sh"
   }
 
   ###########################################################################
