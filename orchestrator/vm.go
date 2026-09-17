@@ -323,7 +323,7 @@ func resolveSourceImage(image string) string {
 	if strings.Contains(image, "/") {
 		return image
 	}
-	return "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
+	return fmt.Sprintf("projects/%s/global/images/%s", imageProject, image)
 }
 
 func parseDiskSize(disk string) int64 {
