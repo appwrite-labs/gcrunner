@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -217,4 +218,87 @@ func signJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	return token.SignedString(key)
+}
+
+type runnerRecord struct {
+	ID   int64 `json:"id"`
+	Busy bool  `json:"busy"`
+}
+
+// findRunner returns the registered runner with this name, or nil.
+func findRunner(ctx context.Context, owner, repo, name string) (*runnerRecord, error) {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners?name=%s", owner, repo, name)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := githubClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Runners []runnerRecord `json:"runners"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if len(result.Runners) == 0 {
+		return nil, nil
+	}
+	return &result.Runners[0], nil
+}
+
+// runnerBusy reports whether the runner with this name is registered and running a job.
+func runnerBusy(ctx context.Context, owner, repo, name string) (bool, error) {
+	runner, err := findRunner(ctx, owner, repo, name)
+	if err != nil {
+		return false, err
+	}
+	return runner != nil && runner.Busy, nil
+}
+
+// removeIdleRunner deletes a registered runner with this name unless it is busy.
+// A JIT registration outlives a failed VM creation, and GitHub refuses a second
+// registration under the same name, so retries must clear it first.
+func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
+	runner, err := findRunner(ctx, owner, repo, name)
+	if err != nil || runner == nil {
+		return err
+	}
+	if runner.Busy {
+		return fmt.Errorf("runner %s is busy", name)
+	}
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/%d", owner, repo, runner.ID)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := githubClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	log.Printf("Removed stale runner registration %s", name)
+	return nil
 }

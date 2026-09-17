@@ -61,16 +61,33 @@ sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
 func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerLabels) error {
 	owner := event.Repository.Owner.Login
 	repo := event.Repository.Name
-	repoFullName := event.Repository.FullName
 
 	instanceName := fmt.Sprintf("gcrunner-%d-%d", event.WorkflowJob.RunID, event.WorkflowJob.ID)
+
+	// A retry finds the registration left by an earlier attempt whose VM never came up.
+	if err := removeIdleRunner(ctx, owner, repo, instanceName); err != nil {
+		return fmt.Errorf("remove stale runner %s: %w", instanceName, err)
+	}
 
 	// Generate JIT config (replaces registration token + config.sh)
 	jitConfig, err := generateJITConfig(ctx, owner, repo, instanceName, event.WorkflowJob.Labels)
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)
 	}
+	createErr := createRunnerInstance(ctx, labels, instanceName, jitConfig, owner, repo)
+	if createErr != nil {
+		if err := removeIdleRunner(ctx, owner, repo, instanceName); err != nil {
+			log.Printf("Could not remove runner registration %s after failed VM creation: %v", instanceName, err)
+		}
+	}
+	return createErr
+}
 
+// createRunnerInstance tries every candidate zone; quota errors are returned
+// so Cloud Tasks retries the job once capacity frees, and every other error
+// that is not fatal moves on to the next zone.
+func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceName, jitConfig, owner, repo string) error {
+	repoFullName := owner + "/" + repo
 	cacheBucket := os.Getenv("GCRUNNER_CACHE_BUCKET")
 	startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo)
 
@@ -195,7 +212,7 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 	// Set spot scheduling if requested
 	if labels.Spot {
 		instance.Scheduling = &computepb.Scheduling{
-			ProvisioningModel:  proto.String("SPOT"),
+			ProvisioningModel:         proto.String("SPOT"),
 			InstanceTerminationAction: proto.String("DELETE"),
 		}
 	}
