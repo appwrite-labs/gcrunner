@@ -110,8 +110,11 @@ jobs:
             test -x /usr/local/bin/cache-server && echo 'PASS: cache-server'
           "
 
-          # Cleanup
-          gcloud compute instances delete "${VM_NAME}" --zone="${ZONE}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet
+      - name: Delete smoke test VM
+        if: always()
+        run: |
+          gcloud compute instances delete "smoke-test-${{ matrix.family }}-${{ github.run_id }}" \
+            --zone="${{ vars.PACKER_ZONE }}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet || true
 
       - name: Delete old images
         run: |
