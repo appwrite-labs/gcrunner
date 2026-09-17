@@ -135,23 +135,6 @@ build {
     scripts          = ["scripts/build/install-docker.sh"]
   }
 
-  # Jobs drive Docker as the runner user without sudo.
-  provisioner "shell" {
-    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    inline          = ["usermod -aG docker runner"]
-  }
-
-  # MongoDB 8.0 refuses kernels 6.19 to 7.0.13 (SERVER-121912); boot the GA 6.8 kernel.
-  provisioner "shell" {
-    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    script          = "scripts/gcrunner/pin-kernel.sh"
-  }
-
-  provisioner "shell" {
-    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    script          = "scripts/gcrunner/trim-boot.sh"
-  }
-
   ###########################################################################
   # gcrunner-specific: Runner agent
   ###########################################################################
@@ -194,9 +177,17 @@ build {
     script           = "scripts/gcrunner/install-gcloud.sh"
   }
 
+  ###########################################################################
+  # Appwrite customisations: kernel pin, docker group, boot trim, preloads
+  ###########################################################################
+  provisioner "file" {
+    source      = "appwrite"
+    destination = "${var.image_folder}/appwrite"
+  }
+
   provisioner "shell" {
     execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    script          = "scripts/gcrunner/preload-images.sh"
+    inline          = ["bash ${var.image_folder}/appwrite/apply.sh", "rm -rf ${var.image_folder}/appwrite"]
   }
 
   ###########################################################################
