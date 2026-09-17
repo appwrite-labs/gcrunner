@@ -64,7 +64,20 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 
 	instanceName := fmt.Sprintf("gcrunner-%d-%d", event.WorkflowJob.RunID, event.WorkflowJob.ID)
 
-	// A retry finds the registration left by an earlier attempt whose VM never came up.
+	// An earlier attempt can have created the VM and still returned an error.
+	// That VM is booting with the JIT config from that attempt, so leave both
+	// it and its registration alone.
+	exists, err := instanceExists(ctx, instanceName)
+	if err != nil {
+		return fmt.Errorf("look up VM %s: %w", instanceName, err)
+	}
+	if exists {
+		log.Printf("VM %s already exists, leaving the earlier attempt to run the job", instanceName)
+		return nil
+	}
+
+	// No VM, so any registration left behind belongs to an attempt that never
+	// reached one. GitHub refuses a second registration under the same name.
 	if err := removeIdleRunner(ctx, owner, repo, instanceName); err != nil {
 		return fmt.Errorf("remove stale runner %s: %w", instanceName, err)
 	}
@@ -228,6 +241,41 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 
 	// Wait for the operation to complete
 	return op.Wait(ctx)
+}
+
+// instanceExists reports whether a VM with this name is present in any zone of
+// the configured region.
+func instanceExists(ctx context.Context, name string) (bool, error) {
+	client, err := compute.NewInstancesRESTClient(ctx)
+	if err != nil {
+		return false, fmt.Errorf("create compute client: %w", err)
+	}
+	defer client.Close()
+
+	project := os.Getenv("GCP_PROJECT")
+	region := os.Getenv("GCE_REGION")
+	if region == "" {
+		region = "us-central1"
+	}
+	zones, zoneErr := ListZones(ctx, project, region)
+	if zoneErr != nil {
+		zones = []string{region + "-a", region + "-b", region + "-c"}
+	}
+
+	for _, zone := range zones {
+		_, err := client.Get(ctx, &computepb.GetInstanceRequest{
+			Project:  project,
+			Zone:     zone,
+			Instance: name,
+		})
+		if err == nil {
+			return true, nil
+		}
+		if !strings.Contains(err.Error(), "notFound") && !strings.Contains(err.Error(), "not found") {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func deleteRunnerVM(ctx context.Context, name string) error {
