@@ -476,6 +476,12 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 	return createRunnerVM(ctx, event, labels)
 }
 
+// Indirected so tests can drive handleCompleted without Compute or GitHub.
+var (
+	deleteVM     = deleteRunnerVM
+	runnerIsBusy = runnerBusy
+)
+
 func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	labels := parseLabels(event.WorkflowJob.Labels)
 	if labels == nil {
@@ -486,7 +492,7 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	if !ranHere {
 		// The job never reached a runner. Its own VM may meanwhile have picked
 		// up another job with the same labels, so only delete it when idle.
-		busy, err := runnerBusy(ctx, event.Repository.Owner.Login, event.Repository.Name, instanceName)
+		busy, err := runnerIsBusy(ctx, event.Repository.Owner.Login, event.Repository.Name, instanceName)
 		if err != nil {
 			return fmt.Errorf("check runner %s: %w", instanceName, err)
 		}
@@ -496,7 +502,7 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 		}
 	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
-	return deleteRunnerVM(ctx, instanceName)
+	return deleteVM(ctx, instanceName)
 }
 
 // deletionTarget names the VM to delete for a completed job. GitHub hands a
