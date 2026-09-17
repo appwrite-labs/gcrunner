@@ -323,9 +323,6 @@ func resolveSourceImage(image string) string {
 	if strings.Contains(image, "/") {
 		return image
 	}
-	// Any other value is an image in the image project, which is how a workflow
-	// pins one build of a family. A label cannot carry a full image path: the
-	// parser splits labels on "/".
 	return fmt.Sprintf("projects/%s/global/images/%s", imageProject, image)
 }
 
