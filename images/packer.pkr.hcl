@@ -8,9 +8,12 @@ packer {
 }
 
 locals {
-  timestamp  = formatdate("YYYYMMDDhhmm", timestamp())
+  timestamp  = formatdate("YYYYMMDDhhmmss", timestamp())
+  # GCE names and label values allow only lowercase letters, digits, - and _ (63 chars).
+  git_sha    = lower(regex_replace(var.git_sha, "[^a-zA-Z0-9_-]", "-"))
+  git_ref    = substr(lower(regex_replace(var.git_ref, "[^a-zA-Z0-9_-]", "-")), 0, 63)
   # Name images after the commit they were built from; the timestamp keeps rebuilds unique.
-  image_name = var.git_sha != "" ? "${var.image_family}-${var.git_sha}-${local.timestamp}" : "${var.image_family}-${local.timestamp}"
+  image_name = local.git_sha != "" ? "${var.image_family}-${local.git_sha}-${local.timestamp}" : "${var.image_family}-${local.timestamp}"
 }
 
 source "googlecompute" "runner" {
@@ -22,8 +25,8 @@ source "googlecompute" "runner" {
   image_family            = var.image_family
   image_description       = var.image_description
   image_labels = {
-    git-sha = var.git_sha
-    git-ref = var.git_ref
+    git-sha = local.git_sha
+    git-ref = local.git_ref
   }
   machine_type            = var.machine_type
   disk_size               = var.disk_size

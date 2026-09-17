@@ -103,8 +103,10 @@ jobs:
             gcloud --version | head -1 && echo 'PASS: gcloud'
             git --version && echo 'PASS: git'
             gh --version | head -1 && echo 'PASS: gh'
-            uname -r | grep -q '^6\.8\.' && echo 'PASS: kernel 6.8'
-            id -nG runner | grep -qw docker && echo 'PASS: runner in docker group'
+            sudo -u runner docker run --detach --rm --name mongo-smoke mongo:8.0 >/dev/null
+            sleep 20
+            sudo -u runner docker logs mongo-smoke 2>&1 | grep -q 'Waiting for connections' && echo 'PASS: mongod starts on this kernel as the runner user'
+            sudo -u runner docker rm --force mongo-smoke >/dev/null
             test -x /usr/local/bin/cache-server && echo 'PASS: cache-server'
           "
 
