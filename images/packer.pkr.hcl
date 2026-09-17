@@ -187,7 +187,7 @@ build {
 
   provisioner "shell" {
     execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    inline          = ["bash ${var.image_folder}/appwrite/apply.sh", "rm -rf ${var.image_folder}/appwrite"]
+    inline          = ["bash ${var.image_folder}/appwrite/apply.sh && rm -rf ${var.image_folder}/appwrite"]
   }
 
   ###########################################################################
