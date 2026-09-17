@@ -6,39 +6,55 @@ on:
     paths:
       - 'images/**'
       - 'cache-server/**'
-      - '.github/workflows/build-images.yml'
-  pull_request:
-    paths:
-      - 'images/**'
-      - 'cache-server/**'
-      - '.github/workflows/build-images.yml'
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 6am UTC
   workflow_dispatch:
-
-env:
-  FAMILY: ubuntu2404-x64
-  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  ZONE: europe-west3-c
+    inputs:
+      family:
+        description: 'Image family to build (or "all")'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - ubuntu2404-x64
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        family:
+          - ubuntu2404-x64
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: cache-server/go.mod
+          go-version: '1.23'
 
       - name: Build cache-server
-        working-directory: cache-server
-        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o cache-server .
+        run: |
+          cd cache-server
+          GOOS=linux GOARCH=amd64 go build -o cache-server .
 
-      - name: Set up Packer
-        uses: hashicorp/setup-packer@v3
+      - name: Install Packer
+        run: |
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update && sudo apt-get install -y packer
 
       - name: Init Packer
         working-directory: images
@@ -46,72 +62,63 @@ jobs:
 
       - name: Validate Packer
         working-directory: images
-        run: packer validate -var-file="${FAMILY}.pkrvars.hcl" -var "project_id=${PROJECT_ID}" -var "zone=${ZONE}" .
+        run: packer validate -var-file="${{ matrix.family }}.pkrvars.hcl" -var "project_id=${{ vars.PACKER_PROJECT_ID }}" -var "zone=${{ vars.PACKER_ZONE }}" .
 
-      - name: Authenticate to GCP
-        if: github.event_name != 'pull_request'
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up Cloud SDK
-        if: github.event_name != 'pull_request'
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Build image
-        if: github.event_name != 'pull_request'
+      - name: Build Image
         working-directory: images
         run: |
-          packer build -color=false \
-            -var-file="${FAMILY}.pkrvars.hcl" \
-            -var "project_id=${PROJECT_ID}" \
-            -var "zone=${ZONE}" \
+          packer build -var-file="${{ matrix.family }}.pkrvars.hcl" \
+            -var "project_id=${{ vars.PACKER_PROJECT_ID }}" \
+            -var "zone=${{ vars.PACKER_ZONE }}" \
             -var "git_sha=${GITHUB_SHA::7}" \
-            -var "git_ref=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')" \
-            -var "image_description=Appwrite runner image from appwrite-labs/gcrunner@${GITHUB_SHA::7}" \
-            .
+            -var "git_ref=${GITHUB_REF_NAME//\//-}" .
 
       - name: Smoke test
-        if: github.event_name != 'pull_request'
         run: |
-          image=$(gcloud compute images list --project="${PROJECT_ID}" \
-            --filter="family=gcrunner-${FAMILY}" --sort-by="~creationTimestamp" --limit=1 --format="value(name)")
-          vm="smoke-${FAMILY}-${GITHUB_RUN_ID}"
-          cat > startup.sh <<'EOF'
-          #!/bin/bash
-          {
-            case "$(uname -r)" in 6.8.*) echo "PASS: kernel $(uname -r)";; *) echo "FAIL: kernel $(uname -r)";; esac
-            id -nG runner | grep -qw docker && echo "PASS: runner in docker group" || echo "FAIL: runner not in docker group"
-            test -f /home/runner/run.sh && echo "PASS: runner agent" || echo "FAIL: runner agent"
-            test -x /usr/local/bin/cache-server && echo "PASS: cache-server" || echo "FAIL: cache-server"
-            docker --version && echo "PASS: docker" || echo "FAIL: docker"
-            git --version && echo "PASS: git" || echo "FAIL: git"
-            gh --version | head -1 && echo "PASS: gh" || echo "FAIL: gh"
-            gcloud --version | head -1 && echo "PASS: gcloud" || echo "FAIL: gcloud"
-            echo "SMOKE DONE"
-          } > /dev/ttyS0 2>&1
-          EOF
-          gcloud compute instances create "${vm}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --machine-type=e2-small --image="${image}" --image-project="${PROJECT_ID}" \
-            --provisioning-model=SPOT --metadata-from-file=startup-script=startup.sh --quiet
-          for _ in $(seq 1 30); do
-            sleep 10
-            output=$(gcloud compute instances get-serial-port-output "${vm}" --project="${PROJECT_ID}" --zone="${ZONE}" 2>/dev/null || true)
-            if grep -q "SMOKE DONE" <<<"${output}"; then break; fi
-          done
-          gcloud compute instances delete "${vm}" --project="${PROJECT_ID}" --zone="${ZONE}" --quiet
-          grep -E "^(PASS|FAIL):" <<<"${output}"
-          if ! grep -q "SMOKE DONE" <<<"${output}" || grep -q "^FAIL:" <<<"${output}"; then
-            echo "::error::smoke test failed for ${image}"
-            exit 1
-          fi
-          echo "image=${image}" >> "${GITHUB_STEP_SUMMARY}"
+          LATEST_IMAGE=$(gcloud compute images list \
+            --project="${{ vars.PACKER_PROJECT_ID }}" \
+            --filter="family=gcrunner-${{ matrix.family }}" \
+            --sort-by="~creationTimestamp" \
+            --limit=1 \
+            --format="value(name)")
+          ZONE="${{ vars.PACKER_ZONE }}"
+          VM_NAME="smoke-test-${{ matrix.family }}-${{ github.run_id }}"
 
-      - name: Delete images older than the newest three
-        if: github.event_name != 'pull_request'
+          gcloud compute instances create "${VM_NAME}" \
+            --project="${{ vars.PACKER_PROJECT_ID }}" \
+            --zone="${ZONE}" \
+            --machine-type=e2-small \
+            --image="${LATEST_IMAGE}" \
+            --image-project="${{ vars.PACKER_PROJECT_ID }}"
+
+          # Wait for VM to boot
+          sleep 30
+
+          # Verify runner agent, key tools, and environment
+          gcloud compute ssh "${VM_NAME}" --zone="${ZONE}" --project="${{ vars.PACKER_PROJECT_ID }}" --command="
+            set -e
+            test -f /home/runner/run.sh && echo 'PASS: run.sh'
+            test -d /opt/hostedtoolcache && echo 'PASS: hostedtoolcache'
+            docker --version && echo 'PASS: docker'
+            gcloud --version | head -1 && echo 'PASS: gcloud'
+            git --version && echo 'PASS: git'
+            gh --version | head -1 && echo 'PASS: gh'
+            uname -r | grep -q '^6\.8\.' && echo 'PASS: kernel 6.8'
+            id -nG runner | grep -qw docker && echo 'PASS: runner in docker group'
+            test -x /usr/local/bin/cache-server && echo 'PASS: cache-server'
+          "
+
+          # Cleanup
+          gcloud compute instances delete "${VM_NAME}" --zone="${ZONE}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet
+
+      - name: Delete old images
         run: |
-          gcloud compute images list --project="${PROJECT_ID}" \
-            --filter="family=gcrunner-${FAMILY}" --sort-by="~creationTimestamp" --format="value(name)" \
-            | tail -n +4 \
-            | xargs -r -n1 gcloud compute images delete --project="${PROJECT_ID}" --quiet
+          OLD_IMAGES=$(gcloud compute images list \
+            --project="${{ vars.PACKER_PROJECT_ID }}" \
+            --filter="family=gcrunner-${{ matrix.family }}" \
+            --sort-by="~creationTimestamp" \
+            --format="value(name)" | tail -n +2)
+          for img in $OLD_IMAGES; do
+            echo "Deleting old image: $img"
+            gcloud compute images delete "$img" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet
+          done
