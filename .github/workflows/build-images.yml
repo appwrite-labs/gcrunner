@@ -69,7 +69,8 @@ jobs:
             -var "project_id=${{ vars.PACKER_PROJECT_ID }}" \
             -var "zone=${{ vars.PACKER_ZONE }}" \
             -var "git_sha=${GITHUB_SHA::7}" \
-            -var "git_ref=${GITHUB_REF_NAME//\//-}" .
+            -var "git_ref=${GITHUB_REF_NAME//\//-}" \
+            -var "build_service_account=${{ vars.PACKER_BUILD_SERVICE_ACCOUNT }}" .
 
       - name: Smoke test
         run: |
@@ -101,6 +102,7 @@ jobs:
             gcloud --version | head -1 && echo 'PASS: gcloud'
             git --version && echo 'PASS: git'
             gh --version | head -1 && echo 'PASS: gh'
+            node --version && npm --version && echo 'PASS: node and npm'
             sudo -u runner docker run --detach --rm --name mongo-smoke mongo:8.0 >/dev/null
             sleep 20
             sudo -u runner docker logs mongo-smoke 2>&1 | grep -q 'Waiting for connections' && echo 'PASS: mongod starts on this kernel as the runner user'
@@ -114,13 +116,13 @@ jobs:
           gcloud compute instances delete "smoke-test-${{ matrix.family }}-${{ github.run_id }}" \
             --zone="${{ vars.PACKER_ZONE }}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet || true
 
-      - name: Delete old images
+      - name: Delete images older than the newest three
         run: |
           OLD_IMAGES=$(gcloud compute images list \
             --project="${{ vars.PACKER_PROJECT_ID }}" \
             --filter="family=gcrunner-${{ matrix.family }}" \
             --sort-by="~creationTimestamp" \
-            --format="value(name)" | tail -n +2)
+            --format="value(name)" | tail -n +4)
           for img in $OLD_IMAGES; do
             echo "Deleting old image: $img"
             gcloud compute images delete "$img" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet

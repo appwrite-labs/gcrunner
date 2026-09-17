@@ -98,3 +98,9 @@ variable "git_ref" {
   default     = ""
   description = "Branch or tag the image is built from; recorded as an image label"
 }
+
+variable "build_service_account" {
+  type        = string
+  default     = ""
+  description = "Service account attached to the build VM; it must read the registries preload-images.sh pulls from"
+}

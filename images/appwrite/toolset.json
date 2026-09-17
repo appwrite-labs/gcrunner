@@ -1,0 +1,32 @@
+{
+  "kernel": {
+    "series": "6.8",
+    "package": "linux-gcp-6.8",
+    "rolling_packages": ["linux-gcp", "linux-image-gcp", "linux-headers-gcp", "linux-modules-extra-gcp"]
+  },
+  "docker": {
+    "group_members": ["runner"]
+  },
+  "services": {
+    "remove_snapd": true,
+    "disable": [
+      "apport.service",
+      "motd-news.timer",
+      "man-db.timer",
+      "update-notifier-download.timer",
+      "update-notifier-motd.timer",
+      "e2scrub_all.timer"
+    ]
+  },
+  "preload": {
+    "registry": "europe-west3-docker.pkg.dev",
+    "images": [
+      "kindest/node:v1.32.2",
+      "nats:2.12-alpine",
+      "docker.dragonflydb.io/dragonflydb/dragonfly"
+    ],
+    "latest_tag_of": [
+      { "repository": "europe-west3-docker.pkg.dev/appwrite-gha-runners/ci/cloud", "tag_prefix": "appwrite-dev-" }
+    ]
+  }
+}

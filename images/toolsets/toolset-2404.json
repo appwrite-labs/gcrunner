@@ -121,14 +121,7 @@
     "node": {
         "default": "20"
     },
-    "node_modules": [
-        { "name": "typescript", "command": "tsc" },
-        { "name": "yarn", "command": "yarn" },
-        { "name": "webpack", "command": "webpack" },
-        { "name": "webpack-cli", "command": "webpack-cli" },
-        { "name": "lerna", "command": "lerna" },
-        { "name": "n", "command": "n" }
-    ],
+    "node_modules": [],
     "pipx": [
         { "package": "yamllint", "cmd": "yamllint" },
         { "package": "ansible-core", "cmd": "ansible" }

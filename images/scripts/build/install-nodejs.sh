@@ -14,7 +14,9 @@ bash ~/n $default_version
 
 # Install node modules
 node_modules=$(get_toolset_value '.node_modules[].name')
-npm install -g $node_modules
+if [ -n "$node_modules" ]; then
+    npm install -g $node_modules
+fi
 
 # Fix global modules installation as regular user
 chmod -R 777 /usr/local/lib/node_modules

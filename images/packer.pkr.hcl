@@ -31,6 +31,8 @@ source "googlecompute" "runner" {
   machine_type            = var.machine_type
   disk_size               = var.disk_size
   access_token            = var.access_token
+  service_account_email   = var.build_service_account
+  scopes                  = ["https://www.googleapis.com/auth/cloud-platform"]
   ssh_username            = "packer"
   tags                    = ["packer"]
 }
@@ -99,15 +101,6 @@ build {
   }
 
   ###########################################################################
-  # Snap: hold auto-refresh to prevent mid-build updates
-  ###########################################################################
-  provisioner "shell" {
-    environment_vars = ["HELPER_SCRIPTS=${var.helper_script_folder}"]
-    execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    scripts          = ["scripts/build/configure-snap.sh"]
-  }
-
-  ###########################################################################
   # Vital packages
   ###########################################################################
   provisioner "shell" {
@@ -127,6 +120,7 @@ build {
       "scripts/build/install-git.sh",
       "scripts/build/install-git-lfs.sh",
       "scripts/build/install-github-cli.sh",
+      "scripts/build/install-nodejs.sh",
       "scripts/build/configure-dpkg.sh",
       "scripts/build/install-yq.sh",
       "scripts/build/install-zstd.sh",
@@ -140,18 +134,6 @@ build {
     environment_vars = ["HELPER_SCRIPTS=${var.helper_script_folder}", "INSTALLER_SCRIPT_FOLDER=${var.installer_script_folder}"]
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
     scripts          = ["scripts/build/install-docker.sh"]
-  }
-
-  # Jobs drive Docker as the runner user without sudo.
-  provisioner "shell" {
-    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    inline          = ["usermod -aG docker runner"]
-  }
-
-  # MongoDB 8.0 refuses kernels 6.19 to 7.0.13 (SERVER-121912); boot the GA 6.8 kernel.
-  provisioner "shell" {
-    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    script          = "scripts/gcrunner/pin-kernel.sh"
   }
 
   ###########################################################################
@@ -194,6 +176,19 @@ build {
   provisioner "shell" {
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
     script           = "scripts/gcrunner/install-gcloud.sh"
+  }
+
+  ###########################################################################
+  # Appwrite customisations: kernel pin, docker group, boot trim, preloads
+  ###########################################################################
+  provisioner "file" {
+    source      = "appwrite"
+    destination = "${var.image_folder}/appwrite"
+  }
+
+  provisioner "shell" {
+    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
+    inline          = ["bash ${var.image_folder}/appwrite/apply.sh && rm -rf ${var.image_folder}/appwrite"]
   }
 
   ###########################################################################

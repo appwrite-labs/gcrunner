@@ -284,9 +284,9 @@ func handleSetupCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Write credentials to Secret Manager
 	secrets := map[string]string{
-		"gcrunner-app-id":          fmt.Sprintf("%d", app.ID),
-		"gcrunner-private-key":     app.PEM,
-		"gcrunner-webhook-secret":  app.WebhookSecret,
+		"gcrunner-app-id":         fmt.Sprintf("%d", app.ID),
+		"gcrunner-private-key":    app.PEM,
+		"gcrunner-webhook-secret": app.WebhookSecret,
 	}
 	for name, value := range secrets {
 		if err := writeSecret(ctx, name, value); err != nil {
@@ -476,15 +476,44 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 	return createRunnerVM(ctx, event, labels)
 }
 
+// Indirected so tests can drive handleCompleted without Compute or GitHub.
+var (
+	deleteVM     = deleteRunnerVM
+	runnerIsBusy = runnerBusy
+)
+
 func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	labels := parseLabels(event.WorkflowJob.Labels)
 	if labels == nil {
 		return nil
 	}
 
-	instanceName := fmt.Sprintf("gcrunner-%d-%d", event.WorkflowJob.RunID, event.WorkflowJob.ID)
+	instanceName, ranHere := deletionTarget(event)
+	if !ranHere {
+		// The job never reached a runner. Its own VM may meanwhile have picked
+		// up another job with the same labels, so only delete it when idle.
+		busy, err := runnerIsBusy(ctx, event.Repository.Owner.Login, event.Repository.Name, instanceName)
+		if err != nil {
+			return fmt.Errorf("check runner %s: %w", instanceName, err)
+		}
+		if busy {
+			log.Printf("Job %d: completed without running, VM %s is busy with another job, leaving it", event.WorkflowJob.ID, instanceName)
+			return nil
+		}
+	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
-	return deleteRunnerVM(ctx, instanceName)
+	return deleteVM(ctx, instanceName)
+}
+
+// deletionTarget names the VM to delete for a completed job. GitHub hands a
+// queued job to any idle runner whose labels cover it, so the VM created for
+// this job may have run a different job; runner_name is the one that ran this
+// job. The bool reports whether the job actually ran on a gcrunner VM.
+func deletionTarget(event WorkflowJobEvent) (string, bool) {
+	if strings.HasPrefix(event.WorkflowJob.RunnerName, "gcrunner-") {
+		return event.WorkflowJob.RunnerName, true
+	}
+	return fmt.Sprintf("gcrunner-%d-%d", event.WorkflowJob.RunID, event.WorkflowJob.ID), false
 }
 
 func verifySignature(payload []byte, signature, secret string) bool {
@@ -509,15 +538,16 @@ type WorkflowJobEvent struct {
 }
 
 type WorkflowJob struct {
-	ID     int64    `json:"id"`
-	RunID  int64    `json:"run_id"`
-	Labels []string `json:"labels"`
+	ID         int64    `json:"id"`
+	RunID      int64    `json:"run_id"`
+	Labels     []string `json:"labels"`
+	RunnerName string   `json:"runner_name"`
 }
 
 type Repository struct {
-	FullName string         `json:"full_name"`
+	FullName string          `json:"full_name"`
 	Owner    RepositoryOwner `json:"owner"`
-	Name     string         `json:"name"`
+	Name     string          `json:"name"`
 }
 
 type RepositoryOwner struct {
