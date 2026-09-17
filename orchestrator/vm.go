@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"strings"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
+	"google.golang.org/api/iterator"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -67,12 +69,12 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 	// An earlier attempt can have created the VM and still returned an error.
 	// That VM is booting with the JIT config from that attempt, so leave both
 	// it and its registration alone.
-	exists, err := instanceExists(ctx, instanceName)
+	zone, err := findInstanceZone(ctx, instanceName)
 	if err != nil {
-		return fmt.Errorf("look up VM %s: %w", instanceName, err)
+		return err
 	}
-	if exists {
-		log.Printf("VM %s already exists, leaving the earlier attempt to run the job", instanceName)
+	if zone != "" {
+		log.Printf("VM %s already exists in %s, leaving the earlier attempt to run the job", instanceName, zone)
 		return nil
 	}
 
@@ -243,76 +245,66 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 	return op.Wait(ctx)
 }
 
-// instanceExists reports whether a VM with this name is present in any zone of
-// the configured region.
-func instanceExists(ctx context.Context, name string) (bool, error) {
+// findInstanceZone returns the zone holding this VM, or "" when no VM of that
+// name exists. It searches the whole project, because a zone= label can place
+// a VM outside the configured region or in a zone ListZones does not report.
+func findInstanceZone(ctx context.Context, name string) (string, error) {
 	client, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
-		return false, fmt.Errorf("create compute client: %w", err)
+		return "", fmt.Errorf("create compute client: %w", err)
 	}
 	defer client.Close()
 
-	project := os.Getenv("GCP_PROJECT")
-	region := os.Getenv("GCE_REGION")
-	if region == "" {
-		region = "us-central1"
-	}
-	zones, zoneErr := ListZones(ctx, project, region)
-	if zoneErr != nil {
-		zones = []string{region + "-a", region + "-b", region + "-c"}
-	}
-
-	for _, zone := range zones {
-		_, err := client.Get(ctx, &computepb.GetInstanceRequest{
-			Project:  project,
-			Zone:     zone,
-			Instance: name,
-		})
-		if err == nil {
-			return true, nil
+	it := client.AggregatedList(ctx, &computepb.AggregatedListInstancesRequest{
+		Project:              os.Getenv("GCP_PROJECT"),
+		Filter:               proto.String(fmt.Sprintf("name = %q", name)),
+		ReturnPartialSuccess: proto.Bool(true),
+	})
+	for {
+		scope, err := it.Next()
+		if err == iterator.Done {
+			return "", nil
 		}
-		if !strings.Contains(err.Error(), "notFound") && !strings.Contains(err.Error(), "not found") {
-			return false, err
+		if err != nil {
+			return "", fmt.Errorf("search for VM %s: %w", name, err)
+		}
+		for _, instance := range scope.Value.GetInstances() {
+			if instance.GetName() == name {
+				// The scope key is "zones/<zone>".
+				return path.Base(scope.Key), nil
+			}
 		}
 	}
-	return false, nil
 }
 
 func deleteRunnerVM(ctx context.Context, name string) error {
+	zone, err := findInstanceZone(ctx, name)
+	if err != nil {
+		return err
+	}
+	if zone == "" {
+		log.Printf("VM %s not found, may have already been deleted", name)
+		return nil
+	}
+
 	client, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
 		return fmt.Errorf("create compute client: %w", err)
 	}
 	defer client.Close()
 
-	project := os.Getenv("GCP_PROJECT")
-	region := os.Getenv("GCE_REGION")
-	if region == "" {
-		region = "us-central1"
+	op, err := client.Delete(ctx, &computepb.DeleteInstanceRequest{
+		Project:  os.Getenv("GCP_PROJECT"),
+		Zone:     zone,
+		Instance: name,
+	})
+	if err != nil {
+		return fmt.Errorf("delete VM %s in %s: %w", name, zone, err)
 	}
-	zones, zoneErr := ListZones(ctx, project, region)
-	if zoneErr != nil {
-		// Fallback: deletion must not fail due to zone listing issues
-		zones = []string{region + "-a", region + "-b", region + "-c"}
+	if err := op.Wait(ctx); err != nil {
+		return fmt.Errorf("wait for VM %s to delete in %s: %w", name, zone, err)
 	}
-
-	for _, zone := range zones {
-		op, err := client.Delete(ctx, &computepb.DeleteInstanceRequest{
-			Project:  project,
-			Zone:     zone,
-			Instance: name,
-		})
-		if err != nil {
-			continue
-		}
-		if err := op.Wait(ctx); err != nil {
-			continue
-		}
-		log.Printf("Deleted VM %s in %s", name, zone)
-		return nil
-	}
-
-	log.Printf("VM %s not found in any zone, may have already been deleted", name)
+	log.Printf("Deleted VM %s in %s", name, zone)
 	return nil
 }
 
