@@ -79,3 +79,22 @@ variable "toolset_file" {
   type    = string
   default = "toolsets/toolset-2404.json"
 }
+
+variable "access_token" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "OAuth access token for the build (no ADC on the build host)"
+}
+
+variable "git_sha" {
+  type        = string
+  default     = ""
+  description = "Short commit SHA the image is built from; becomes part of the image name and a label"
+}
+
+variable "git_ref" {
+  type        = string
+  default     = ""
+  description = "Branch or tag the image is built from; recorded as an image label"
+}

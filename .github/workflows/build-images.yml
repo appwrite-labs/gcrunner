@@ -18,7 +18,6 @@ on:
         options:
           - all
           - ubuntu2404-x64
-          - ubuntu2204-x64
 
 jobs:
   build:
@@ -28,10 +27,6 @@ jobs:
       matrix:
         family:
           - ubuntu2404-x64
-          - ubuntu2204-x64
-        exclude:
-          - family: ${{ (github.event.inputs.family || 'all') != 'all' && (github.event.inputs.family || 'all') != 'ubuntu2404-x64' && 'ubuntu2404-x64' || '' }}
-          - family: ${{ (github.event.inputs.family || 'all') != 'all' && (github.event.inputs.family || 'all') != 'ubuntu2204-x64' && 'ubuntu2204-x64' || '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -67,11 +62,16 @@ jobs:
 
       - name: Validate Packer
         working-directory: images
-        run: packer validate -var-file="${{ matrix.family }}.pkrvars.hcl" -var "project_id=${{ vars.PACKER_PROJECT_ID }}" .
+        run: packer validate -var-file="${{ matrix.family }}.pkrvars.hcl" -var "project_id=${{ vars.PACKER_PROJECT_ID }}" -var "zone=${{ vars.PACKER_ZONE }}" .
 
       - name: Build Image
         working-directory: images
-        run: packer build -var-file="${{ matrix.family }}.pkrvars.hcl" -var "project_id=${{ vars.PACKER_PROJECT_ID }}" .
+        run: |
+          packer build -var-file="${{ matrix.family }}.pkrvars.hcl" \
+            -var "project_id=${{ vars.PACKER_PROJECT_ID }}" \
+            -var "zone=${{ vars.PACKER_ZONE }}" \
+            -var "git_sha=${GITHUB_SHA::7}" \
+            -var "git_ref=${GITHUB_REF_NAME//\//-}" .
 
       - name: Smoke test
         run: |
@@ -81,7 +81,7 @@ jobs:
             --sort-by="~creationTimestamp" \
             --limit=1 \
             --format="value(name)")
-          ZONE="us-central1-a"
+          ZONE="${{ vars.PACKER_ZONE }}"
           VM_NAME="smoke-test-${{ matrix.family }}-${{ github.run_id }}"
 
           gcloud compute instances create "${VM_NAME}" \
@@ -103,28 +103,18 @@ jobs:
             gcloud --version | head -1 && echo 'PASS: gcloud'
             git --version && echo 'PASS: git'
             gh --version | head -1 && echo 'PASS: gh'
-            node --version && echo 'PASS: node'
-            python3 --version && echo 'PASS: python3'
-            rustc --version && echo 'PASS: rust'
-            java -version 2>&1 | head -1 && echo 'PASS: java'
+            sudo -u runner docker run --detach --rm --name mongo-smoke mongo:8.0 >/dev/null
+            sleep 20
+            sudo -u runner docker logs mongo-smoke 2>&1 | grep -q 'Waiting for connections' && echo 'PASS: mongod starts on this kernel as the runner user'
+            sudo -u runner docker rm --force mongo-smoke >/dev/null
             test -x /usr/local/bin/cache-server && echo 'PASS: cache-server'
           "
 
-          # Cleanup
-          gcloud compute instances delete "${VM_NAME}" --zone="${ZONE}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet
-
-      - name: Make image public
+      - name: Delete smoke test VM
+        if: always()
         run: |
-          LATEST_IMAGE=$(gcloud compute images list \
-            --project="${{ vars.PACKER_PROJECT_ID }}" \
-            --filter="family=gcrunner-${{ matrix.family }}" \
-            --sort-by="~creationTimestamp" \
-            --limit=1 \
-            --format="value(name)")
-          gcloud compute images add-iam-policy-binding "$LATEST_IMAGE" \
-            --project="${{ vars.PACKER_PROJECT_ID }}" \
-            --member=allAuthenticatedUsers \
-            --role=roles/compute.imageUser
+          gcloud compute instances delete "smoke-test-${{ matrix.family }}-${{ github.run_id }}" \
+            --zone="${{ vars.PACKER_ZONE }}" --project="${{ vars.PACKER_PROJECT_ID }}" --quiet || true
 
       - name: Delete old images
         run: |
