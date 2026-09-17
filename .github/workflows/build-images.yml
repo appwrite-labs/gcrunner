@@ -69,7 +69,8 @@ jobs:
             -var "project_id=${{ vars.PACKER_PROJECT_ID }}" \
             -var "zone=${{ vars.PACKER_ZONE }}" \
             -var "git_sha=${GITHUB_SHA::7}" \
-            -var "git_ref=${GITHUB_REF_NAME//\//-}" .
+            -var "git_ref=${GITHUB_REF_NAME//\//-}" \
+            -var "build_service_account=${{ vars.PACKER_BUILD_SERVICE_ACCOUNT }}" .
 
       - name: Smoke test
         run: |

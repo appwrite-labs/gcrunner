@@ -31,6 +31,8 @@ source "googlecompute" "runner" {
   machine_type            = var.machine_type
   disk_size               = var.disk_size
   access_token            = var.access_token
+  service_account_email   = var.build_service_account
+  scopes                  = ["https://www.googleapis.com/auth/cloud-platform"]
   ssh_username            = "packer"
   tags                    = ["packer"]
 }
@@ -99,15 +101,6 @@ build {
   }
 
   ###########################################################################
-  # Snap: hold auto-refresh to prevent mid-build updates
-  ###########################################################################
-  provisioner "shell" {
-    environment_vars = ["HELPER_SCRIPTS=${var.helper_script_folder}"]
-    execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
-    scripts          = ["scripts/build/configure-snap.sh"]
-  }
-
-  ###########################################################################
   # Vital packages
   ###########################################################################
   provisioner "shell" {
@@ -154,6 +147,11 @@ build {
     script          = "scripts/gcrunner/pin-kernel.sh"
   }
 
+  provisioner "shell" {
+    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
+    script          = "scripts/gcrunner/trim-boot.sh"
+  }
+
   ###########################################################################
   # gcrunner-specific: Runner agent
   ###########################################################################
@@ -194,6 +192,11 @@ build {
   provisioner "shell" {
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
     script           = "scripts/gcrunner/install-gcloud.sh"
+  }
+
+  provisioner "shell" {
+    execute_command = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
+    script          = "scripts/gcrunner/preload-images.sh"
   }
 
   ###########################################################################
