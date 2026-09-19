@@ -2,6 +2,7 @@ package function
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -46,7 +47,7 @@ if [ -n "${CACHE_BUCKET}" ] && [ -x /usr/local/bin/cache-server ]; then
   export ACTIONS_RESULTS_URL="http://localhost:8787/"
   export ACTIONS_CACHE_SERVICE_V2=true
 fi
-
+%s
 # Source /etc/environment for image-configured variables (HOME, NVM_DIR,
 # XDG_CONFIG_HOME, PATH entries for cargo/pip, AGENT_TOOLSDIRECTORY, etc.)
 # sudo does not go through PAM login, so these are not loaded automatically.
@@ -60,6 +61,44 @@ fi
 # Run with JIT config (skips config.sh entirely)
 sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
 `
+
+// registryScriptTemplate hands every job step the registry URLs through the
+// runner's .env file and lets docker mint tokens for both hosts from the
+// metadata server, so a long job never outlives a login.
+const registryScriptTemplate = `
+install -d -o runner -g runner -m 700 /home/runner/.docker
+echo '%s' > /home/runner/.docker/config.json
+printf 'GCRUNNER_REGISTRY=%%s\nGCRUNNER_REGISTRY_PULL=%%s\n' "%s" "%s" >> /home/runner/.env
+chown runner:runner /home/runner/.docker/config.json /home/runner/.env
+`
+
+func registryScript(zone string) string {
+	registry := os.Getenv("GCRUNNER_REGISTRY")
+	if registry == "" {
+		return ""
+	}
+	pull := pullRegistry(registry, zone)
+	helpers := map[string]string{registryHost(registry): "gcloud", registryHost(pull): "gcloud"}
+	config, _ := json.Marshal(map[string]any{"credHelpers": helpers})
+	return fmt.Sprintf(registryScriptTemplate, config, registry, pull)
+}
+
+// pullRegistry is the read-through cache for the VM's region, or the registry
+// itself when that region has none. Repository ids match terraform/registry.tf.
+func pullRegistry(registry, zone string) string {
+	region := zone[:max(strings.LastIndex(zone, "-"), 0)]
+	for _, cached := range strings.Split(os.Getenv("GCRUNNER_REGISTRY_REGIONS"), ",") {
+		if strings.TrimSpace(cached) == region {
+			return fmt.Sprintf("%s-docker.pkg.dev/%s/gcrunner-registry-%s", region, os.Getenv("GCP_PROJECT"), region)
+		}
+	}
+	return registry
+}
+
+func registryHost(registry string) string {
+	host, _, _ := strings.Cut(registry, "/")
+	return host
+}
 
 func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerLabels) error {
 	owner := event.Repository.Owner.Login
@@ -109,7 +148,6 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceName, jitConfig, owner, repo string) error {
 	repoFullName := owner + "/" + repo
 	cacheBucket := os.Getenv("GCRUNNER_CACHE_BUCKET")
-	startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo)
 
 	region := os.Getenv("GCE_REGION")
 	if region == "" {
@@ -150,6 +188,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			machineType = resolved
 		}
 
+		startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo, registryScript(zone))
 		err := insertInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
 		if err == nil {
 			log.Printf("Created VM %s in %s (type=%s) for %s", instanceName, zone, machineType, repoFullName)

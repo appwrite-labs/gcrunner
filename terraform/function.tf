@@ -51,6 +51,14 @@ resource "google_cloud_run_v2_service" "webhook" {
         value = var.enable_cache ? (var.cache_bucket_name != "" ? var.cache_bucket_name : "${var.project_id}-gcrunner-cache") : ""
       }
       env {
+        name  = "GCRUNNER_REGISTRY"
+        value = local.registry_url
+      }
+      env {
+        name  = "GCRUNNER_REGISTRY_REGIONS"
+        value = join(",", local.registry_regions)
+      }
+      env {
         name  = "GCRUNNER_IMAGE_PROJECT"
         value = var.image_project
       }

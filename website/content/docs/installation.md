@@ -27,6 +27,7 @@ This opens an interactive tutorial that walks you through the full setup in abou
 | Cloud Run service | Webhook receiver and VM orchestrator |
 | Service accounts | Minimal IAM for the service and runner VMs |
 | Artifact Registry | Remote repository for the gcrunner container image |
+| Artifact Registry (registry) | Repository jobs push to, plus a read-through cache per pool region |
 | Secret Manager secrets | GitHub App credentials storage |
 | GCS bucket (cache) | Build cache storage |
 | GCS bucket (tfstate) | Terraform remote state |

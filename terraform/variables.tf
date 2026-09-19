@@ -44,3 +44,15 @@ variable "gcrunner_version" {
   type        = string
   default     = "v0.2.0"
 }
+
+variable "enable_registry" {
+  description = "Create the Artifact Registry repository jobs push to and a read-through cache in every pool region"
+  type        = bool
+  default     = true
+}
+
+variable "registry_retention_days" {
+  description = "Days an image stays in the registry and its regional caches"
+  type        = number
+  default     = 10
+}

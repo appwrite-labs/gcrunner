@@ -1,6 +1,6 @@
 ---
 title: "Architecture"
-weight: 4
+weight: 5
 ---
 
 # Architecture
@@ -101,6 +101,10 @@ Four secrets are stored and never appear in Terraform state or logs:
 
 Each VM runs a local cache server that proxies GitHub Actions cache API calls to GCS. This gives jobs a fast, persistent build cache without any external dependencies. The cache server is scoped per repository (owner + repo), so cache entries don't bleed between repos.
 
+### Container Registry
+
+Each VM is authenticated to an Artifact Registry repository before the job starts and exposes it as `GCRUNNER_REGISTRY`, with a region-local read-through cache as `GCRUNNER_REGISTRY_PULL`. See [Container Registry](../registry/).
+
 ## Infrastructure
 
 All GCP resources are managed by Terraform.
@@ -120,7 +124,7 @@ graph LR
     end
 
     SVCFN -- "create VMs, read secrets, enqueue" --> GCP[(GCP APIs)]
-    SVCRUN -- "delete self, cache access" --> GCP
+    SVCRUN -- "delete self, cache and registry access" --> GCP
     SVCTASK -- "invoke Cloud Run" --> GCP
 ```
 
@@ -129,7 +133,7 @@ Three service accounts are used, each scoped to exactly what it needs:
 | Service Account | Used by | Key permissions |
 |---|---|---|
 | `gcrunner-function` | Cloud Run orchestrator | Create/delete VMs, read secrets, enqueue tasks |
-| `gcrunner-runner` | Runner VMs | Delete itself, read/write cache bucket |
+| `gcrunner-runner` | Runner VMs | Delete itself, read/write cache bucket, push to registry, pull from regional caches |
 | `gcrunner-tasks` | Cloud Tasks | Invoke Cloud Run `/task/*` endpoints |
 
 ## Machine Type Resolution
