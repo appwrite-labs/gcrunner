@@ -1,6 +1,6 @@
 ---
 title: "Updating"
-weight: 7
+weight: 8
 ---
 
 # Updating
@@ -40,3 +40,7 @@ terraform apply
 ```
 
 Terraform will update the Cloud Run service to the latest gcrunner image and apply any infrastructure changes. No downtime — in-flight jobs are unaffected.
+
+## GitHub App permissions
+
+Repository configuration (`.github/gcrunner.yml`) needs the GitHub App to read repository contents. Apps created before that permission was added get a pending request on their installation: accept it under **Settings → GitHub Apps → gcrunner** in the organization or account where the App is installed. Until then jobs that use `runner=` stay queued, while jobs that only use labels are unaffected.

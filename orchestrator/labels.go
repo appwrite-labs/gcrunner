@@ -4,6 +4,7 @@ import "strings"
 
 const (
 	labelRunID    = "gcrunner"
+	labelRunner   = "runner"
 	labelMachine  = "machine"
 	labelFamily   = "family"
 	labelSpot     = "spot"
@@ -52,10 +53,11 @@ type RunnerLabels struct {
 	MachineMode string
 }
 
-// JobLabels is what a job wrote on its gcrunner label: the run it belongs to
-// and the settings it set explicitly.
+// JobLabels is what a job wrote on its gcrunner label: the run it belongs to,
+// the preset it selected with runner=, and the settings it set explicitly.
 type JobLabels struct {
 	RunID    string
+	Runner   string
 	Settings Settings
 }
 
@@ -72,11 +74,14 @@ func parseJobLabels(labels []string) *JobLabels {
 			if !ok {
 				continue
 			}
-			if key == labelRunID {
+			switch key {
+			case labelRunID:
 				job.RunID = value
-				continue
+			case labelRunner:
+				job.Runner = value
+			default:
+				job.Settings[key] = value
 			}
-			job.Settings[key] = value
 		}
 		return job
 	}
@@ -90,12 +95,25 @@ func parseLabels(labels []string) *RunnerLabels {
 	if job == nil {
 		return nil
 	}
-	return job.runner()
+	return job.runner(nil)
 }
 
-// runner lays the job's own settings over the defaults.
-func (j *JobLabels) runner() *RunnerLabels {
-	settings := merge(defaultSettings, j.Settings)
+// runner lays the preset over the defaults and the job's own settings over
+// both. Machine mode comes from the explicit layers, and the job's choice of
+// how to pick a machine beats the preset's: a job that writes machine= wants
+// that machine, so a family= inherited from its preset is dropped rather than
+// left to outrank it, and a job that writes cpu= or ram= wants a machine that
+// fits, so a machine= inherited from its preset is dropped rather than left
+// to make the constraint a no-op.
+func (j *JobLabels) runner(preset Settings) *RunnerLabels {
+	explicit := merge(preset, j.Settings)
+	if j.Settings[labelMachine] != "" && j.Settings[labelFamily] == "" {
+		delete(explicit, labelFamily)
+	}
+	if j.Settings[labelMachine] == "" && (j.Settings[labelCPU] != "" || j.Settings[labelRAM] != "") {
+		delete(explicit, labelMachine)
+	}
+	settings := merge(defaultSettings, explicit)
 	return &RunnerLabels{
 		RunID:       j.RunID,
 		Machine:     settings[labelMachine],
@@ -107,7 +125,7 @@ func (j *JobLabels) runner() *RunnerLabels {
 		CPU:         settings[labelCPU],
 		RAM:         settings[labelRAM],
 		Zone:        settings[labelZone],
-		MachineMode: classifyMachineMode(j.Settings),
+		MachineMode: classifyMachineMode(explicit),
 	}
 }
 

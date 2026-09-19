@@ -16,6 +16,7 @@ runs-on: gcrunner=${{ github.run_id }}/machine=n2d-standard-8/disk=100gb/spot=fa
 | Label | Default | Description |
 |---|---|---|
 | `gcrunner` | *(required)* | Identifies the job. Use `${{ github.run_id }}` as the value. |
+| `runner` | — | A preset from `.github/gcrunner.yml` to start from (see [Repository Configuration](/docs/configuration/)) |
 | `machine` | `n2d-standard-2` | Exact GCE machine type |
 | `family` | — | Machine family for automatic type resolution (see below) |
 | `cpu` | — | vCPU constraint for auto/family resolution, e.g. `4` or `2+8` |
@@ -111,6 +112,17 @@ You can also provide a fully-qualified GCE image path:
 ```yaml
 runs-on: gcrunner=${{ github.run_id }}/image=projects/my-project/global/images/family/my-runner
 ```
+
+## Presets
+
+Repeating the same labels on every job gets long. Define the shape once in `.github/gcrunner.yml` and select it with `runner=`; labels on the job override the preset.
+
+```yaml
+runs-on: gcrunner=${{ github.run_id }}/runner=e2e
+runs-on: gcrunner=${{ github.run_id }}/runner=e2e/disk=200gb
+```
+
+See [Repository Configuration](/docs/configuration/) for the file format.
 
 ## Examples
 

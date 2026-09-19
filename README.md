@@ -41,6 +41,9 @@ runs-on: gcrunner=${{ github.run_id }}/machine=c3-standard-8/disk=200gb
 
 # No spot for production deploys
 runs-on: gcrunner=${{ github.run_id }}/spot=false
+
+# A preset from .github/gcrunner.yml, see the docs
+runs-on: gcrunner=${{ github.run_id }}/runner=e2e
 ```
 
 ## Deploying

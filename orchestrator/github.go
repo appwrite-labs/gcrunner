@@ -6,10 +6,12 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +46,8 @@ func generateJITConfig(ctx context.Context, owner, repo, runnerName string, labe
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/generate-jitconfig", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyJSON)))
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/generate-jitconfig", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(bodyJSON)))
 	if err != nil {
 		return "", err
 	}
@@ -80,8 +82,8 @@ func getRegistrationToken(ctx context.Context, owner, repo string) (string, erro
 		return "", fmt.Errorf("get installation token: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/registration-token", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/registration-token", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -121,8 +123,8 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 		return "", fmt.Errorf("get installation ID: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -151,8 +153,8 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 
 // getInstallationID finds the installation ID for a given owner (org or user).
 func getInstallationID(ctx context.Context, appJWT, owner string) (int64, error) {
-	url := fmt.Sprintf("https://api.github.com/users/%s/installation", owner)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/users/%s/installation", owner)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -220,6 +222,53 @@ func signJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	return token.SignedString(key)
 }
 
+// fetchRepositoryContents returns a file from the repository at ref, or nil
+// when the repository has no such file.
+func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	query := url.Values{"ref": {ref}}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?%s", owner, repo, path, query.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	resp, err := githubClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return io.ReadAll(resp.Body)
+	case http.StatusNotFound:
+		return nil, nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+}
+
+// githubError is a non-2xx answer from the GitHub API.
+type githubError struct {
+	Status int
+	Body   string
+}
+
+func (e *githubError) Error() string {
+	return fmt.Sprintf("GitHub returned %d: %s", e.Status, e.Body)
+}
+
+// isForbidden reports whether GitHub refused the request for lack of a
+// permission on the App installation.
+func isForbidden(err error) bool {
+	var ghErr *githubError
+	return errors.As(err, &ghErr) && ghErr.Status == http.StatusForbidden
+}
+
 type runnerRecord struct {
 	ID   int64 `json:"id"`
 	Busy bool  `json:"busy"`
@@ -231,8 +280,8 @@ func findRunner(ctx context.Context, owner, repo, name string) (*runnerRecord, e
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners?name=%s", owner, repo, name)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners?name=%s", owner, repo, name)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +332,8 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/%d", owner, repo, runner.ID)
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/%d", owner, repo, runner.ID)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", endpoint, nil)
 	if err != nil {
 		return err
 	}

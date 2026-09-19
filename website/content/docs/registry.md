@@ -1,6 +1,6 @@
 ---
 title: "Container Registry"
-weight: 4
+weight: 5
 ---
 
 # Container Registry

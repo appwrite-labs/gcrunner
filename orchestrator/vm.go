@@ -404,22 +404,28 @@ func deleteRunnerVM(ctx context.Context, name string) error {
 	return nil
 }
 
-func resolveSourceImage(image string) string {
-	imageProject := os.Getenv("GCRUNNER_IMAGE_PROJECT")
-	if imageProject == "" {
-		imageProject = "gcrunner-images"
+// imageProject is where the built-in images and any image definition without
+// a project of its own live.
+func imageProject() string {
+	if project := os.Getenv("GCRUNNER_IMAGE_PROJECT"); project != "" {
+		return project
 	}
+	return "gcrunner-images"
+}
+
+func resolveSourceImage(image string) string {
+	project := imageProject()
 	imageMap := map[string]string{
 		"ubuntu24-full-x64": "gcrunner-ubuntu2404-x64",
 		"ubuntu22-full-x64": "gcrunner-ubuntu2204-x64",
 	}
 	if family, ok := imageMap[image]; ok {
-		return fmt.Sprintf("projects/%s/global/images/family/%s", imageProject, family)
+		return fmt.Sprintf("projects/%s/global/images/family/%s", project, family)
 	}
 	if strings.Contains(image, "/") {
 		return image
 	}
-	return fmt.Sprintf("projects/%s/global/images/%s", imageProject, image)
+	return fmt.Sprintf("projects/%s/global/images/%s", project, image)
 }
 
 func parseDiskSize(disk string) int64 {
