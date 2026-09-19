@@ -84,12 +84,13 @@ func registryScript(zone string) string {
 }
 
 // pullRegistry is the read-through cache for the VM's region, or the registry
-// itself when that region has none. Repository ids match terraform/registry.tf.
+// itself when that region has none. GCRUNNER_REGISTRY_PULLS is a comma-separated
+// list of region=url pairs.
 func pullRegistry(registry, zone string) string {
 	region := zone[:max(strings.LastIndex(zone, "-"), 0)]
-	for _, cached := range strings.Split(os.Getenv("GCRUNNER_REGISTRY_REGIONS"), ",") {
-		if strings.TrimSpace(cached) == region {
-			return fmt.Sprintf("%s-docker.pkg.dev/%s/gcrunner-registry-%s", region, os.Getenv("GCP_PROJECT"), region)
+	for _, pair := range strings.Split(os.Getenv("GCRUNNER_REGISTRY_PULLS"), ",") {
+		if cached, url, ok := strings.Cut(pair, "="); ok && cached == region {
+			return url
 		}
 	}
 	return registry

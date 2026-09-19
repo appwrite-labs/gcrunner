@@ -55,8 +55,8 @@ resource "google_cloud_run_v2_service" "webhook" {
         value = local.registry_url
       }
       env {
-        name  = "GCRUNNER_REGISTRY_REGIONS"
-        value = join(",", local.registry_regions)
+        name  = "GCRUNNER_REGISTRY_PULLS"
+        value = join(",", local.registry_pulls)
       }
       env {
         name  = "GCRUNNER_IMAGE_PROJECT"

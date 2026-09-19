@@ -1,6 +1,7 @@
 locals {
   registry_regions = var.enable_registry ? setsubtract(toset([for zone in var.zones : regex("^(.+)-[a-z]$", zone)[0]]), [var.region]) : toset([])
   registry_url     = var.enable_registry ? "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.registry[0].repository_id}" : ""
+  registry_pulls   = [for region, repository in google_artifact_registry_repository.registry_pull : "${region}=${region}-docker.pkg.dev/${var.project_id}/${repository.repository_id}"]
 }
 
 # Jobs push images here; the URL reaches every job as GCRUNNER_REGISTRY.
@@ -24,7 +25,7 @@ resource "google_artifact_registry_repository" "registry" {
 }
 
 # One read-through cache per pool region outside var.region, so a VM pulls
-# from its own region. Hardcoded id pattern — must match orchestrator/vm.go.
+# from its own region.
 resource "google_artifact_registry_repository" "registry_pull" {
   for_each      = local.registry_regions
   repository_id = "gcrunner-registry-${each.key}"
