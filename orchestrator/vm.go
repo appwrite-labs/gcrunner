@@ -183,7 +183,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 	for _, zone := range zones {
 		// Resolve machine type per zone if not exact
 		machineType := labels.Machine
-		if labels.MachineMode != "exact" {
+		if labels.MachineMode != machineModeExact {
 			resolved, resolveErr := ResolveMachineType(ctx, project, zone, labels)
 			if resolveErr != nil {
 				log.Printf("Failed to resolve machine type in %s: %v, trying next zone", zone, resolveErr)

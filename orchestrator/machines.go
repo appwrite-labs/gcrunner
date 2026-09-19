@@ -107,7 +107,7 @@ func fetchMachineTypes(ctx context.Context, project, zone string) ([]*MachineTyp
 // In exact mode, returns the machine as-is. In family or auto mode, queries available
 // machine types and picks the smallest one satisfying the constraints.
 func ResolveMachineType(ctx context.Context, project, zone string, labels *RunnerLabels) (string, error) {
-	if labels.MachineMode == "exact" {
+	if labels.MachineMode == machineModeExact {
 		return labels.Machine, nil
 	}
 
@@ -117,7 +117,7 @@ func ResolveMachineType(ctx context.Context, project, zone string, labels *Runne
 	}
 
 	family := labels.Family
-	if labels.MachineMode == "auto" {
+	if labels.MachineMode == machineModeAuto {
 		family = "n2d"
 	}
 	families := strings.Split(family, "+")

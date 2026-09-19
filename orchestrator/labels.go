@@ -2,7 +2,38 @@ package function
 
 import "strings"
 
-// RunnerLabels holds the parsed gcrunner label configuration.
+const (
+	labelRunID    = "gcrunner"
+	labelMachine  = "machine"
+	labelFamily   = "family"
+	labelSpot     = "spot"
+	labelDisk     = "disk"
+	labelDiskType = "disk-type"
+	labelImage    = "image"
+	labelCPU      = "cpu"
+	labelRAM      = "ram"
+	labelZone     = "zone"
+)
+
+const (
+	machineModeExact  = "exact"
+	machineModeFamily = "family"
+	machineModeAuto   = "auto"
+)
+
+// Settings are runner options keyed by label name, holding only what was
+// spelled out, so a layer can tell a default apart from an explicit choice.
+type Settings map[string]string
+
+var defaultSettings = Settings{
+	labelMachine:  "n2d-standard-2",
+	labelSpot:     "true",
+	labelDisk:     "75gb",
+	labelDiskType: "pd-ssd",
+	labelImage:    "ubuntu24-full-x64",
+}
+
+// RunnerLabels holds the resolved gcrunner configuration for a job.
 type RunnerLabels struct {
 	RunID    string
 	Machine  string // Exact machine type (e.g. "n2d-standard-4", "e2-micro")
@@ -21,77 +52,93 @@ type RunnerLabels struct {
 	MachineMode string
 }
 
-// parseLabels extracts gcrunner config from workflow_job labels.
+// JobLabels is what a job wrote on its gcrunner label: the run it belongs to
+// and the settings it set explicitly.
+type JobLabels struct {
+	RunID    string
+	Settings Settings
+}
+
+// parseJobLabels finds the gcrunner label among a job's labels.
 // Returns nil if this is not a gcrunner job.
-func parseLabels(labels []string) *RunnerLabels {
+func parseJobLabels(labels []string) *JobLabels {
 	for _, label := range labels {
-		if !strings.HasPrefix(label, "gcrunner=") {
+		if !strings.HasPrefix(label, labelRunID+"=") {
 			continue
 		}
-
-		result := &RunnerLabels{
-			// Defaults from spec
-			Machine:  "n2d-standard-2",
-			Spot:     true,
-			Disk:     "75gb",
-			DiskType: "pd-ssd",
-			Image:    "ubuntu24-full-x64",
-		}
-
-		parts := strings.Split(label, "/")
-		for _, part := range parts {
-			kv := strings.SplitN(part, "=", 2)
-			if len(kv) != 2 {
+		job := &JobLabels{Settings: Settings{}}
+		for _, part := range strings.Split(label, "/") {
+			key, value, ok := strings.Cut(part, "=")
+			if !ok {
 				continue
 			}
-			switch kv[0] {
-			case "gcrunner":
-				result.RunID = kv[1]
-			case "machine":
-				result.Machine = kv[1]
-			case "family":
-				result.Family = kv[1]
-			case "spot":
-				result.Spot = kv[1] != "false"
-			case "disk":
-				result.Disk = kv[1]
-			case "disk-type":
-				result.DiskType = kv[1]
-			case "image":
-				result.Image = kv[1]
-			case "cpu":
-				result.CPU = kv[1]
-			case "ram":
-				result.RAM = kv[1]
-			case "zone":
-				result.Zone = kv[1]
+			if key == labelRunID {
+				job.RunID = value
+				continue
 			}
+			job.Settings[key] = value
 		}
-
-		result.MachineMode = classifyMachineMode(result)
-
-		return result
+		return job
 	}
 	return nil
 }
 
-// classifyMachineMode determines how the machine type should be resolved.
+// parseLabels extracts gcrunner config from workflow_job labels.
+// Returns nil if this is not a gcrunner job.
+func parseLabels(labels []string) *RunnerLabels {
+	job := parseJobLabels(labels)
+	if job == nil {
+		return nil
+	}
+	return job.runner()
+}
+
+// runner lays the job's own settings over the defaults.
+func (j *JobLabels) runner() *RunnerLabels {
+	settings := merge(defaultSettings, j.Settings)
+	return &RunnerLabels{
+		RunID:       j.RunID,
+		Machine:     settings[labelMachine],
+		Family:      settings[labelFamily],
+		Spot:        settings[labelSpot] != "false",
+		Disk:        settings[labelDisk],
+		DiskType:    settings[labelDiskType],
+		Image:       settings[labelImage],
+		CPU:         settings[labelCPU],
+		RAM:         settings[labelRAM],
+		Zone:        settings[labelZone],
+		MachineMode: classifyMachineMode(j.Settings),
+	}
+}
+
+// merge lays each layer over the previous one; later layers win.
+func merge(layers ...Settings) Settings {
+	merged := Settings{}
+	for _, layer := range layers {
+		for key, value := range layer {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+// classifyMachineMode determines how the machine type should be resolved from
+// what was set explicitly, so a machine= that happens to name the default is
+// still honoured as an exact request.
 //
 // Priority:
 //  1. family= is set → "family" mode (resolve using family + cpu/ram)
-//  2. machine= was explicitly changed from default → "exact" mode
-//  3. cpu= or ram= set (no family, default machine) → "auto" mode (default family n2d)
+//  2. machine= is set → "exact" mode
+//  3. cpu= or ram= set → "auto" mode (default family n2d)
 //  4. Nothing set → "exact" mode with default machine
-func classifyMachineMode(labels *RunnerLabels) string {
-	if labels.Family != "" {
-		return "family"
+func classifyMachineMode(explicit Settings) string {
+	switch {
+	case explicit[labelFamily] != "":
+		return machineModeFamily
+	case explicit[labelMachine] != "":
+		return machineModeExact
+	case explicit[labelCPU] != "" || explicit[labelRAM] != "":
+		return machineModeAuto
 	}
-	if labels.Machine != "n2d-standard-2" {
-		// Machine was explicitly set — use it as-is
-		return "exact"
-	}
-	if labels.CPU != "" || labels.RAM != "" {
-		return "auto"
-	}
-	return "exact"
+	return machineModeExact
 }
