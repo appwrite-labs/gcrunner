@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -473,19 +474,27 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 		return nil
 	}
 
-	config, err := loadRepositoryConfig(ctx, event)
-	if err != nil {
-		return err
-	}
-	labels, err := config.resolve(job, imageProject())
-	if err != nil {
+	labels, err := resolveJob(ctx, event, job)
+	if errors.Is(err, errConfiguration) {
 		// A retry cannot fix the workflow, so leave the job queued and say why.
 		log.Printf("Job %d: %v, leaving it queued", event.WorkflowJob.ID, err)
 		return nil
 	}
+	if err != nil {
+		return err
+	}
 
 	log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
 	return createRunnerVM(ctx, event, labels)
+}
+
+// resolveJob turns the job's labels into a runner using the repository's config.
+func resolveJob(ctx context.Context, event WorkflowJobEvent, job *JobLabels) (*RunnerLabels, error) {
+	config, err := loadRepositoryConfig(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	return config.resolve(job, imageProject())
 }
 
 // Indirected so tests can drive handleCompleted without Compute or GitHub.

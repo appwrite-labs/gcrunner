@@ -154,6 +154,9 @@ func TestResolve(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.err) {
 					t.Fatalf("err = %v, want %q", err, tt.err)
 				}
+				if !errors.Is(err, errConfiguration) {
+					t.Errorf("err = %v, want one a retry will not be attempted for", err)
+				}
 				return
 			}
 			if err != nil {
@@ -279,7 +282,7 @@ func TestConfigCacheLoad(t *testing.T) {
 	}
 
 	reply, replyErr = []byte("runners: [not a map]"), nil
-	if _, err = cache.load(context.Background(), "o", "r", "main", false); err == nil {
-		t.Error("a malformed file should be an error")
+	if _, err = cache.load(context.Background(), "o", "r", "main", false); !errors.Is(err, errConfiguration) {
+		t.Errorf("a malformed file: err = %v, want a configuration error no retry is attempted for", err)
 	}
 }

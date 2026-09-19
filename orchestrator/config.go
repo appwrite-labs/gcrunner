@@ -2,6 +2,7 @@ package function
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -14,6 +15,10 @@ import (
 
 // configPath is where a repository keeps its runner presets and images.
 const configPath = ".github/gcrunner.yml"
+
+// errConfiguration marks a mistake in the workflow or the config file. A retry
+// cannot mend it, so the job is left queued with the reason logged.
+var errConfiguration = errors.New("configuration error")
 
 // RepositoryConfig is the parsed .github/gcrunner.yml. A repository without
 // one gets the zero value, which resolves every job from its labels alone.
@@ -118,7 +123,7 @@ func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*Runner
 	if job.Runner != "" {
 		definition, ok := c.Runners[job.Runner]
 		if !ok {
-			return nil, fmt.Errorf("runner %q is not defined in %s", job.Runner, configPath)
+			return nil, fmt.Errorf("%w: runner %q is not defined in %s", errConfiguration, job.Runner, configPath)
 		}
 		preset = definition.settings()
 	}
@@ -126,7 +131,7 @@ func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*Runner
 	if definition, ok := c.Images[runner.Image]; ok {
 		path, err := definition.path(imageProject)
 		if err != nil {
-			return nil, fmt.Errorf("image %q in %s: %w", runner.Image, configPath, err)
+			return nil, fmt.Errorf("%w: image %q in %s: %v", errConfiguration, runner.Image, configPath, err)
 		}
 		runner.Image = path
 	}
@@ -136,7 +141,7 @@ func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*Runner
 func parseRepositoryConfig(data []byte) (*RepositoryConfig, error) {
 	var config RepositoryConfig
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", configPath, err)
+		return nil, fmt.Errorf("%w: parse %s: %v", errConfiguration, configPath, err)
 	}
 	return &config, nil
 }
