@@ -56,6 +56,19 @@ Edits to the file on a public repository take effect once merged.
 
 Reading the file needs the gcrunner GitHub App to have **read access to repository contents**. New Apps created through the setup page request it. An App created before this permission existed shows a pending permission request under the organization's installed GitHub Apps; until an admin accepts it, jobs that reference `runner=` stay queued and the orchestrator logs why. Jobs that only use labels keep running either way, including an `image=` that names an image the file would have defined: without the file that name is passed to GCE as-is, so keep such jobs on a built-in image or a full image path until the permission is in place.
 
+## `_extends`
+
+A repository whose `.github/gcrunner.yml` this file inherits from, written as `repo` for the same owner or `owner/repo`. Its runners and images fill in whatever this file does not define; a name defined locally wins outright, there is no deep merge. The base file is read from its default branch, and only one level is followed.
+
+```yaml
+_extends: .github-private
+runners:
+  build:
+    cpu: 8   # overrides the build runner in .github-private, other runners come through as-is
+```
+
+The gcrunner GitHub App must be installed on the repository holding the shared file. A shared file that cannot be read leaves the job queued with the reason logged, like a `runner=` that names nothing.
+
 ## `runners`
 
 A mapping of runner names to settings. Every key is optional and uses the [label](/docs/labels/) of the same name.

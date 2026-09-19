@@ -241,9 +241,8 @@ func TestConfigCacheLoad(t *testing.T) {
 	}
 
 	reply, replyErr = nil, nil
-	config, err := cache.load(context.Background(), "o", "r", "main", false)
-	if err != nil || len(config.Runners) != 0 {
-		t.Errorf("missing file: config=%+v err=%v, want empty and nil", config, err)
+	if _, err := cache.load(context.Background(), "o", "r", "main", false); !errors.Is(err, errConfigNotFound) {
+		t.Errorf("missing file: err = %v, want not found", err)
 	}
 
 	replyErr = &githubError{Status: http.StatusForbidden, Body: "Resource not accessible by integration"}
@@ -313,4 +312,127 @@ func TestConfigCacheLoad_CoalescesConcurrentMisses(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("twenty jobs on one commit read GitHub %d times, want once", calls)
 	}
+}
+
+func TestLoadRepositoryConfig(t *testing.T) {
+	files := map[string]string{}
+	var forbidden map[string]bool
+	fetchRepositoryFile = func(_ context.Context, owner, repo, _, ref string) ([]byte, error) {
+		key := owner + "/" + repo + "@" + ref
+		if forbidden[key] {
+			return nil, &githubError{Status: http.StatusForbidden}
+		}
+		if data, ok := files[key]; ok {
+			return []byte(data), nil
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { fetchRepositoryFile = fetchRepositoryContents })
+
+	sha := strings.Repeat("b", 40)
+	event := WorkflowJobEvent{
+		WorkflowJob: WorkflowJob{HeadSHA: sha},
+		Repository:  Repository{Owner: RepositoryOwner{Login: "acme"}, Name: "app", Private: true},
+	}
+	load := func(t *testing.T) *RepositoryConfig {
+		t.Helper()
+		config, err := loadRepositoryConfig(context.Background(), event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return config
+	}
+	reset := func() {
+		configCache.configs = map[string]configCacheEntry{}
+		files = map[string]string{}
+		forbidden = map[string]bool{}
+	}
+
+	t.Run("no file resolves from labels alone", func(t *testing.T) {
+		reset()
+		if runner := resolveWith(t, load(t), "gcrunner=1/cpu=4"); runner.CPU != "4" {
+			t.Errorf("runner = %+v", runner)
+		}
+	})
+
+	t.Run("unreadable file holds preset jobs only", func(t *testing.T) {
+		reset()
+		forbidden["acme/app@"+sha] = true
+		config := load(t)
+		if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=build"}), "p"); !errors.Is(err, errConfiguration) {
+			t.Errorf("runner= err = %v, want a configuration error", err)
+		}
+		resolveWith(t, config, "gcrunner=1/cpu=4")
+	})
+
+	t.Run("local names win over the shared file", func(t *testing.T) {
+		reset()
+		files["acme/app@"+sha] = "_extends: .github-private\nrunners:\n  build:\n    cpu: 8\n"
+		files["acme/.github-private@"] = "runners:\n  build:\n    cpu: 2\n  e2e:\n    cpu: 16\nimages:\n  ci:\n    family: ci\n"
+		config := load(t)
+		if got := resolveWith(t, config, "gcrunner=1/runner=build").CPU; got != "8" {
+			t.Errorf("build cpu = %q, want the local 8", got)
+		}
+		if got := resolveWith(t, config, "gcrunner=1/runner=e2e").CPU; got != "16" {
+			t.Errorf("e2e cpu = %q, want 16 from the shared file", got)
+		}
+		if got := resolveWith(t, config, "gcrunner=1/image=ci").Image; !strings.HasSuffix(got, "/family/ci") {
+			t.Errorf("image ci = %q, want the shared file's family", got)
+		}
+	})
+
+	t.Run("shared file is read from its default branch", func(t *testing.T) {
+		reset()
+		files["acme/app@"+sha] = "_extends: shared/config\n"
+		files["shared/config@"+sha] = "runners:\n  wrong:\n    cpu: 1\n"
+		files["shared/config@"] = "runners:\n  deploy:\n    cpu: 4\n"
+		config := load(t)
+		if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=wrong"}), "p"); err == nil {
+			t.Error("a runner from the shared file at the job's commit was inherited")
+		}
+		if resolveWith(t, config, "gcrunner=1/runner=deploy").CPU != "4" {
+			t.Error("the shared file's default branch was not read")
+		}
+	})
+
+	t.Run("only one level is followed", func(t *testing.T) {
+		reset()
+		files["acme/app@"+sha] = "_extends: shared/config\n"
+		files["shared/config@"] = "_extends: acme/other\nrunners:\n  deploy:\n    cpu: 4\n"
+		files["acme/other@"] = "runners:\n  far:\n    cpu: 2\n"
+		config := load(t)
+		if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=far"}), "p"); err == nil {
+			t.Error("a runner two hops away was inherited")
+		}
+		resolveWith(t, config, "gcrunner=1/runner=deploy")
+	})
+
+	t.Run("a shared file edit reaches the next job on a cached commit", func(t *testing.T) {
+		reset()
+		files["acme/app@"+sha] = "_extends: .github-private\n"
+		files["acme/.github-private@"] = "runners:\n  e2e:\n    cpu: 16\n  old:\n    cpu: 1\n"
+		load(t)
+		files["acme/.github-private@"] = "runners:\n  e2e:\n    cpu: 32\n"
+		config := load(t)
+		if got := resolveWith(t, config, "gcrunner=1/runner=e2e").CPU; got != "32" {
+			t.Errorf("e2e cpu = %q, want the edited 32", got)
+		}
+		if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=old"}), "p"); err == nil {
+			t.Error("a runner removed from the shared file was still inherited")
+		}
+	})
+
+	t.Run("missing or unreadable shared file is the author's to fix", func(t *testing.T) {
+		for name, setup := range map[string]func(){
+			"missing":    func() { files["acme/app@"+sha] = "_extends: nowhere\n" },
+			"unreadable": func() { files["acme/app@"+sha] = "_extends: nowhere\n"; forbidden["acme/nowhere@"] = true },
+		} {
+			reset()
+			setup()
+			_, err := loadRepositoryConfig(context.Background(), event)
+			if !errors.Is(err, errConfiguration) || !strings.Contains(err.Error(), "nowhere") {
+				t.Errorf("%s: err = %v, want a configuration error naming the repository", name, err)
+			}
+		}
+	})
 }

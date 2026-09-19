@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,15 +29,59 @@ var errConfiguration = errors.New("configuration error")
 // read access to repository contents, so the file cannot be read at all.
 var errConfigForbidden = errors.New("the gcrunner GitHub App has no read access to repository contents")
 
+// errConfigNotFound reports a repository without the file. The job's own
+// repository may do without one; a repository named in _extends may not.
+var errConfigNotFound = errors.New("no " + configPath)
+
 // RepositoryConfig is the parsed .github/gcrunner.yml. A repository without
 // one gets the zero value, which resolves every job from its labels alone.
 type RepositoryConfig struct {
+	// Extends names a repository, "repo" or "owner/repo", whose own
+	// .github/gcrunner.yml supplies the runners and images this file does
+	// not define. Local names win outright; there is no deep merge.
+	Extends string                     `yaml:"_extends"`
 	Runners map[string]RunnerPreset    `yaml:"runners"`
 	Images  map[string]ImageDefinition `yaml:"images"`
 
 	// unreadable is set when the file could not be read for lack of
 	// permission, so a job that depends on it is held rather than guessed at.
 	unreadable bool
+}
+
+// extend returns this config with the runners and images base defines and
+// this config does not. The receiver is left untouched, since it may be the
+// cached copy that later jobs on the same commit will read again.
+func (c *RepositoryConfig) extend(base *RepositoryConfig) *RepositoryConfig {
+	extended := &RepositoryConfig{
+		Runners: maps.Clone(c.Runners),
+		Images:  maps.Clone(c.Images),
+	}
+	if extended.Runners == nil {
+		extended.Runners = map[string]RunnerPreset{}
+	}
+	if extended.Images == nil {
+		extended.Images = map[string]ImageDefinition{}
+	}
+	for name, preset := range base.Runners {
+		if _, ok := extended.Runners[name]; !ok {
+			extended.Runners[name] = preset
+		}
+	}
+	for name, image := range base.Images {
+		if _, ok := extended.Images[name]; !ok {
+			extended.Images[name] = image
+		}
+	}
+	return extended
+}
+
+// extendsTarget splits _extends into owner and repository, defaulting the
+// owner to the extending repository's own.
+func extendsTarget(extends, owner string) (string, string) {
+	if baseOwner, baseRepo, ok := strings.Cut(extends, "/"); ok {
+		return baseOwner, baseRepo
+	}
+	return owner, extends
 }
 
 // RunnerPreset is a named set of runner settings a job selects with runner=.
@@ -201,7 +246,8 @@ func configRef(event WorkflowJobEvent) string {
 }
 
 // ConfigCache keeps parsed configs by commit. Only immutable refs are cached;
-// a branch name is read fresh so an edit to the file shows up on the next job.
+// a branch name, or "" for the default branch, is read fresh so an edit to the
+// file shows up on the next job.
 // Concurrent misses for one key share a single fetch, so a workflow fanning
 // out twenty jobs at once reads the file once.
 type ConfigCache struct {
@@ -214,6 +260,7 @@ type ConfigCache struct {
 
 type configCacheEntry struct {
 	config    *RepositoryConfig
+	err       error
 	fetchedAt time.Time
 }
 
@@ -231,16 +278,37 @@ var fetchRepositoryFile = fetchRepositoryContents
 // been granted contents access yet yields a config marked unreadable, so jobs
 // that never reference the file keep running while jobs that select a runner
 // are held until the permission is accepted.
+//
+// A file that names another repository in _extends inherits that repository's
+// config as read from its default branch. Only one level is followed, so two
+// files pointing at each other cannot loop. A shared file that cannot be read
+// is the author's to fix, unlike the optional local one.
 func loadRepositoryConfig(ctx context.Context, event WorkflowJobEvent) (*RepositoryConfig, error) {
 	owner := event.Repository.Owner.Login
 	repo := event.Repository.Name
 	ref := configRef(event)
 	config, err := configCache.load(ctx, owner, repo, ref, isCommitSHA(ref))
-	if errors.Is(err, errConfigForbidden) {
+	switch {
+	case errors.Is(err, errConfigForbidden):
 		log.Printf("Cannot read %s in %s/%s: %v", configPath, owner, repo, err)
 		return &RepositoryConfig{unreadable: true}, nil
+	case errors.Is(err, errConfigNotFound):
+		return &RepositoryConfig{}, nil
+	case err != nil:
+		return nil, err
+	case config.Extends == "":
+		return config, nil
 	}
-	return config, err
+
+	baseOwner, baseRepo := extendsTarget(config.Extends, owner)
+	base, err := configCache.load(ctx, baseOwner, baseRepo, "", false)
+	switch {
+	case errors.Is(err, errConfigNotFound), errors.Is(err, errConfigForbidden):
+		return nil, fmt.Errorf("%w: _extends %s: %v", errConfiguration, config.Extends, err)
+	case err != nil:
+		return nil, fmt.Errorf("_extends %s: %w", config.Extends, err)
+	}
+	return config.extend(base), nil
 }
 
 // load returns the parsed file at ref. A permission failure is never cached,
@@ -255,7 +323,7 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 		entry, ok := c.configs[key]
 		c.mu.RUnlock()
 		if ok && now.Sub(entry.fetchedAt) < c.ttl {
-			return entry.config, nil
+			return entry.config, entry.err
 		}
 	}
 
@@ -266,9 +334,10 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 	result, err, _ := c.group.Do(key, func() (any, error) {
 		data, err := fetchRepositoryFile(fetchCtx, owner, repo, configPath, ref)
 		var config *RepositoryConfig
+		var result error
 		switch {
 		case err == nil && data == nil:
-			config = &RepositoryConfig{}
+			result = errConfigNotFound
 		case err == nil:
 			config, err = parseRepositoryConfig(data)
 			if err != nil {
@@ -286,10 +355,10 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 			fetchedAt := c.nowFunc()
 			c.mu.Lock()
 			c.evictExpired(fetchedAt)
-			c.configs[key] = configCacheEntry{config: config, fetchedAt: fetchedAt}
+			c.configs[key] = configCacheEntry{config: config, err: result, fetchedAt: fetchedAt}
 			c.mu.Unlock()
 		}
-		return config, nil
+		return config, result
 	})
 	if err != nil {
 		return nil, err
