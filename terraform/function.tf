@@ -43,6 +43,10 @@ resource "google_cloud_run_v2_service" "webhook" {
         value = var.region
       }
       env {
+        name  = "GCRUNNER_ZONES"
+        value = join(",", var.zones)
+      }
+      env {
         name  = "GCRUNNER_CACHE_BUCKET"
         value = var.enable_cache ? (var.cache_bucket_name != "" ? var.cache_bucket_name : "${var.project_id}-gcrunner-cache") : ""
       }
