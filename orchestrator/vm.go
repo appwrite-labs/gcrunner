@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync/atomic"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
@@ -98,9 +99,10 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 	return createErr
 }
 
-// createRunnerInstance tries every candidate zone; quota errors are returned
-// so Cloud Tasks retries the job once capacity frees, and every other error
-// that is not fatal moves on to the next zone.
+// createRunnerInstance tries every candidate zone. A zone that is out of quota
+// is skipped like any other soft failure, so one exhausted region does not hold
+// up a job the rest of the pool could run; the quota error is only returned if
+// every zone reports one, which leaves Cloud Tasks to retry once capacity frees.
 func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceName, jitConfig, owner, repo string) error {
 	repoFullName := owner + "/" + repo
 	cacheBucket := os.Getenv("GCRUNNER_CACHE_BUCKET")
@@ -115,9 +117,12 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 
 	// Determine zones to try
 	var zones []string
-	if labels.Zone != "" {
+	switch {
+	case labels.Zone != "":
 		zones = strings.Split(labels.Zone, "+")
-	} else {
+	case len(configuredZones()) > 0:
+		zones = configuredZones()
+	default:
 		var zoneErr error
 		zones, zoneErr = ListZones(ctx, project, region)
 		if zoneErr != nil {
@@ -125,8 +130,10 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			zones = []string{region + "-a", region + "-b", region + "-c"}
 		}
 	}
+	zones = rotate(zones, nextZoneOffset())
 
 	var lastErr error
+	var quotaErr error
 	for _, zone := range zones {
 		// Resolve machine type per zone if not exact
 		machineType := labels.Machine
@@ -140,7 +147,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			machineType = resolved
 		}
 
-		err := createInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
+		err := insertInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
 		if err == nil {
 			log.Printf("Created VM %s in %s (type=%s) for %s", instanceName, zone, machineType, repoFullName)
 			return nil
@@ -151,7 +158,10 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		case insertErrorAlreadyExists:
 			log.Printf("VM %s already exists in %s (duplicate webhook), skipping", instanceName, zone)
 			return nil
-		case insertErrorQuota, insertErrorFatal:
+		case insertErrorQuota:
+			quotaErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
+			log.Printf("Out of quota in %s, trying next zone", zone)
+		case insertErrorFatal:
 			return fmt.Errorf("failed to create VM in %s: %w", zone, err)
 		default:
 			lastErr = err
@@ -159,8 +169,43 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		}
 	}
 
+	if quotaErr != nil {
+		return fmt.Errorf("every zone out of quota: %w", quotaErr)
+	}
+
 	return fmt.Errorf("failed to create VM in any zone: %w", lastErr)
 }
+
+// configuredZones is the GCRUNNER_ZONES pool, a comma-separated list that lets
+// one deployment spread across regions without a zone= on every label.
+func configuredZones() []string {
+	var zones []string
+	for _, zone := range strings.Split(os.Getenv("GCRUNNER_ZONES"), ",") {
+		if zone = strings.TrimSpace(zone); zone != "" {
+			zones = append(zones, zone)
+		}
+	}
+	return zones
+}
+
+var zoneOffset atomic.Uint64
+
+// nextZoneOffset spreads consecutive jobs across the pool instead of stacking
+// them all onto whichever zone happens to be listed first.
+func nextZoneOffset() int {
+	return int(zoneOffset.Add(1) - 1)
+}
+
+func rotate(zones []string, offset int) []string {
+	if len(zones) < 2 {
+		return zones
+	}
+	start := offset % len(zones)
+	return append(append([]string{}, zones[start:]...), zones[:start]...)
+}
+
+// insertInstance is a seam so the zone loop can be exercised without GCE.
+var insertInstance = createInstance
 
 func createInstance(ctx context.Context, name, zone, machineType string, labels *RunnerLabels, startupScript, jitConfig string) error {
 	client, err := compute.NewInstancesRESTClient(ctx)

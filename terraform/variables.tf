@@ -3,6 +3,12 @@ variable "project_id" {
   type        = string
 }
 
+variable "zones" {
+  description = "Zone pool tried in round-robin order; empty falls back to the zones of region"
+  type        = list(string)
+  default     = []
+}
+
 variable "region" {
   description = "GCP region"
   type        = string
