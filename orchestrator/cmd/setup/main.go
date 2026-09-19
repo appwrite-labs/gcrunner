@@ -50,6 +50,7 @@ func main() {
 		DefaultPermissions: map[string]string{
 			"actions":        "read",
 			"administration": "write",
+			"contents":       "read",
 		},
 		DefaultEvents: []string{"workflow_job"},
 	}

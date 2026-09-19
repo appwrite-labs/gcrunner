@@ -38,7 +38,7 @@ cd website && hugo server
 
 ## Key Concepts
 
-- All runner config lives in the workflow `runs-on:` field using `/`-separated `key=value` labels
+- All runner config lives in the workflow `runs-on:` field using `/`-separated `key=value` labels; `runner=<name>` selects a preset from the repository's `.github/gcrunner.yml`
 - VMs are ephemeral — one job per VM, self-destruct on completion
 - Spot VMs are used by default with automatic fallback to on-demand
 - Webhook authentication uses HMAC-SHA256

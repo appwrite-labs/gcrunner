@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -218,6 +219,52 @@ func signJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	return token.SignedString(key)
+}
+
+// fetchRepositoryContents returns a file from the repository at ref, or nil
+// when the repository has no such file.
+func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	resp, err := githubClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return io.ReadAll(resp.Body)
+	case http.StatusNotFound:
+		return nil, nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+}
+
+// githubError is a non-2xx answer from the GitHub API.
+type githubError struct {
+	Status int
+	Body   string
+}
+
+func (e *githubError) Error() string {
+	return fmt.Sprintf("GitHub returned %d: %s", e.Status, e.Body)
+}
+
+// isForbidden reports whether GitHub refused the request for lack of a
+// permission on the App installation.
+func isForbidden(err error) bool {
+	var ghErr *githubError
+	return errors.As(err, &ghErr) && ghErr.Status == http.StatusForbidden
 }
 
 type runnerRecord struct {

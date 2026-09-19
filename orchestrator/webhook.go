@@ -183,6 +183,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		DefaultPermissions: map[string]string{
 			"actions":        "read",
 			"administration": "write",
+			"contents":       "read",
 		},
 		DefaultEvents: []string{"workflow_job"},
 	}
@@ -466,9 +467,20 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
-	labels := parseLabels(event.WorkflowJob.Labels)
-	if labels == nil {
+	job := parseJobLabels(event.WorkflowJob.Labels)
+	if job == nil {
 		log.Printf("Job %d: not a gcrunner job, skipping", event.WorkflowJob.ID)
+		return nil
+	}
+
+	config, err := loadRepositoryConfig(ctx, event)
+	if err != nil {
+		return err
+	}
+	labels, err := config.resolve(job, imageProject())
+	if err != nil {
+		// A retry cannot fix the workflow, so leave the job queued and say why.
+		log.Printf("Job %d: %v, leaving it queued", event.WorkflowJob.ID, err)
 		return nil
 	}
 
@@ -483,8 +495,7 @@ var (
 )
 
 func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
-	labels := parseLabels(event.WorkflowJob.Labels)
-	if labels == nil {
+	if parseJobLabels(event.WorkflowJob.Labels) == nil {
 		return nil
 	}
 
@@ -540,14 +551,17 @@ type WorkflowJobEvent struct {
 type WorkflowJob struct {
 	ID         int64    `json:"id"`
 	RunID      int64    `json:"run_id"`
+	HeadSHA    string   `json:"head_sha"`
 	Labels     []string `json:"labels"`
 	RunnerName string   `json:"runner_name"`
 }
 
 type Repository struct {
-	FullName string          `json:"full_name"`
-	Owner    RepositoryOwner `json:"owner"`
-	Name     string          `json:"name"`
+	FullName      string          `json:"full_name"`
+	Owner         RepositoryOwner `json:"owner"`
+	Name          string          `json:"name"`
+	Private       bool            `json:"private"`
+	DefaultBranch string          `json:"default_branch"`
 }
 
 type RepositoryOwner struct {
