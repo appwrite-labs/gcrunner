@@ -281,9 +281,12 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 		}
 
 		if cacheable {
+			// Stamped after the read, so a slow GitHub does not eat into
+			// the entry's lifetime.
+			fetchedAt := c.nowFunc()
 			c.mu.Lock()
-			c.evictExpired(now)
-			c.configs[key] = configCacheEntry{config: config, fetchedAt: now}
+			c.evictExpired(fetchedAt)
+			c.configs[key] = configCacheEntry{config: config, fetchedAt: fetchedAt}
 			c.mu.Unlock()
 		}
 		return config, nil

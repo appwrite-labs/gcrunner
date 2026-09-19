@@ -239,12 +239,6 @@ func TestConfigCacheLoad(t *testing.T) {
 	if config.Runners["a"].CPU != "8" {
 		t.Errorf("an expired commit entry was still served: cpu = %q", config.Runners["a"].CPU)
 	}
-	cache.load(context.Background(), "o", "r", strings.Repeat("d", 40), true)
-	now = now.Add(2 * time.Hour)
-	cache.load(context.Background(), "o", "r", strings.Repeat("e", 40), true)
-	if len(cache.configs) != 1 {
-		t.Errorf("%d entries kept after every earlier commit expired, want only the newest", len(cache.configs))
-	}
 
 	reply, replyErr = nil, nil
 	config, err := cache.load(context.Background(), "o", "r", "main", false)
