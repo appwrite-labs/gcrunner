@@ -168,7 +168,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		case insertErrorFatal:
 			return fmt.Errorf("failed to create VM in %s: %w", zone, err)
 		default:
-			lastErr = err
+			lastErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
 			log.Printf("Failed to create VM in %s: %v, trying next zone", zone, err)
 		}
 	}
