@@ -18,3 +18,7 @@ output "runner_service_account" {
 output "cache_bucket_name" {
   value = var.enable_cache ? google_storage_bucket.cache[0].name : ""
 }
+
+output "registry_url" {
+  value = local.registry_url
+}
