@@ -141,7 +141,7 @@ func TestResolve_WithoutFile(t *testing.T) {
 }
 
 func TestResolve_UnreadableFileHoldsPresetJobs(t *testing.T) {
-	config := &RepositoryConfig{unreadable: true}
+	config := &RepositoryConfig{unreadable: errConfigForbidden}
 	if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=build"}), "p"); !errors.Is(err, errConfiguration) || !strings.Contains(err.Error(), "read access") {
 		t.Errorf("err = %v, want a configuration error naming the missing permission", err)
 	}
@@ -417,16 +417,22 @@ func TestLoadRepositoryConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("missing or unreadable shared file is the author's to fix", func(t *testing.T) {
+	t.Run("missing or unreadable shared file holds only the jobs that needed it", func(t *testing.T) {
+		local := "_extends: nowhere\nrunners:\n  build:\n    cpu: 8\n"
 		for name, setup := range map[string]func(){
-			"missing":    func() { files["acme/app@"+sha] = "_extends: nowhere\n" },
-			"unreadable": func() { files["acme/app@"+sha] = "_extends: nowhere\n"; forbidden["acme/nowhere@"] = true },
+			"missing":    func() { files["acme/app@"+sha] = local },
+			"unreadable": func() { files["acme/app@"+sha] = local; forbidden["acme/nowhere@"] = true },
 		} {
 			reset()
 			setup()
-			_, err := loadRepositoryConfig(context.Background(), event)
+			config := load(t)
+			resolveWith(t, config, "gcrunner=1/cpu=4")
+			if resolveWith(t, config, "gcrunner=1/runner=build").CPU != "8" {
+				t.Errorf("%s: a runner the local file defines was lost", name)
+			}
+			_, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=e2e"}), "p")
 			if !errors.Is(err, errConfiguration) || !strings.Contains(err.Error(), "nowhere") {
-				t.Errorf("%s: err = %v, want a configuration error naming the repository", name, err)
+				t.Errorf("%s: runner from the shared file: err = %v, want a configuration error naming the repository", name, err)
 			}
 		}
 	})

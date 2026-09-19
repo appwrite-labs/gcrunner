@@ -67,7 +67,7 @@ runners:
     cpu: 8   # overrides the build runner in .github-private, other runners come through as-is
 ```
 
-The gcrunner GitHub App must be installed on the repository holding the shared file. A shared file that cannot be read leaves the job queued with the reason logged, like a `runner=` that names nothing.
+The gcrunner GitHub App must be installed on the repository holding the shared file. If the shared file is missing or cannot be read, the local definitions still apply; only a job whose `runner=` the local file does not define is left queued, with the shared repository named in the log. A shared file's own `_extends` is not followed, and the orchestrator logs when it sees one.
 
 ## `runners`
 

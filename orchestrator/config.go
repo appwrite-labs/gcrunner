@@ -43,9 +43,10 @@ type RepositoryConfig struct {
 	Runners map[string]RunnerPreset    `yaml:"runners"`
 	Images  map[string]ImageDefinition `yaml:"images"`
 
-	// unreadable is set when the file could not be read for lack of
-	// permission, so a job that depends on it is held rather than guessed at.
-	unreadable bool
+	// unreadable records why the file, or the shared file it extends, could
+	// not be read, so a job that depends on it is held with that reason
+	// rather than guessed at. nil when everything was read.
+	unreadable error
 }
 
 // extend returns this config with the runners and images base defines and
@@ -197,14 +198,15 @@ func (d ImageDefinition) path(defaultProject string) (string, error) {
 func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*RunnerLabels, error) {
 	var preset Settings
 	if job.Runner != "" {
-		if c.unreadable {
-			return nil, fmt.Errorf("%w: runner %q needs %s, but %v", errConfiguration, job.Runner, configPath, errConfigForbidden)
-		}
 		definition, ok := c.Runners[job.Runner]
-		if !ok {
+		switch {
+		case ok:
+			preset = definition.settings()
+		case c.unreadable != nil:
+			return nil, fmt.Errorf("%w: runner %q needs %s, but %v", errConfiguration, job.Runner, configPath, c.unreadable)
+		default:
 			return nil, fmt.Errorf("%w: runner %q is not defined in %s", errConfiguration, job.Runner, configPath)
 		}
-		preset = definition.settings()
 	}
 	runner := job.runner(preset)
 	if definition, ok := c.Images[runner.Image]; ok {
@@ -282,7 +284,9 @@ var fetchRepositoryFile = fetchRepositoryContents
 // A file that names another repository in _extends inherits that repository's
 // config as read from its default branch. Only one level is followed, so two
 // files pointing at each other cannot loop. A shared file that cannot be read
-// is the author's to fix, unlike the optional local one.
+// degrades the same way as an unreadable local one: the local definitions
+// still apply, and only a job whose runner they do not define is held, so a
+// typo in _extends cannot stop every job in the repository.
 func loadRepositoryConfig(ctx context.Context, event WorkflowJobEvent) (*RepositoryConfig, error) {
 	owner := event.Repository.Owner.Login
 	repo := event.Repository.Name
@@ -291,7 +295,7 @@ func loadRepositoryConfig(ctx context.Context, event WorkflowJobEvent) (*Reposit
 	switch {
 	case errors.Is(err, errConfigForbidden):
 		log.Printf("Cannot read %s in %s/%s: %v", configPath, owner, repo, err)
-		return &RepositoryConfig{unreadable: true}, nil
+		return &RepositoryConfig{unreadable: err}, nil
 	case errors.Is(err, errConfigNotFound):
 		return &RepositoryConfig{}, nil
 	case err != nil:
@@ -304,9 +308,15 @@ func loadRepositoryConfig(ctx context.Context, event WorkflowJobEvent) (*Reposit
 	base, err := configCache.load(ctx, baseOwner, baseRepo, "", false)
 	switch {
 	case errors.Is(err, errConfigNotFound), errors.Is(err, errConfigForbidden):
-		return nil, fmt.Errorf("%w: _extends %s: %v", errConfiguration, config.Extends, err)
+		log.Printf("Cannot read %s in %s, named by _extends in %s/%s: %v", configPath, config.Extends, owner, repo, err)
+		extended := config.extend(&RepositoryConfig{})
+		extended.unreadable = fmt.Errorf("_extends %s: %w", config.Extends, err)
+		return extended, nil
 	case err != nil:
 		return nil, fmt.Errorf("_extends %s: %w", config.Extends, err)
+	}
+	if base.Extends != "" {
+		log.Printf("%s in %s declares _extends %s, which is not followed: %s/%s inherits one level only", configPath, config.Extends, base.Extends, owner, repo)
 	}
 	return config.extend(base), nil
 }
