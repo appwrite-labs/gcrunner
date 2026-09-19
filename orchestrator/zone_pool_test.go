@@ -11,6 +11,7 @@ func withInsert(t *testing.T, fn func(ctx context.Context, name, zone, machineTy
 	t.Helper()
 	original := insertInstance
 	insertInstance = fn
+	zoneOffset.Store(0)
 	t.Cleanup(func() { insertInstance = original })
 }
 
@@ -33,6 +34,51 @@ func TestQuotaInOneZoneFallsThroughToTheNext(t *testing.T) {
 	}
 	if len(tried) != 2 || tried[1] != "zone-b" {
 		t.Fatalf("expected both zones to be tried in order, got %v", tried)
+	}
+}
+
+// Zones pinned on the label are a preference order, not a pool: the first
+// listed zone must be tried first on every job.
+func TestLabelZonesAreNotRotated(t *testing.T) {
+	var first []string
+	withInsert(t, func(_ context.Context, _, zone, _ string, _ *RunnerLabels, _, _ string) error {
+		first = append(first, zone)
+		return nil
+	})
+
+	labels := &RunnerLabels{Zone: "zone-a+zone-b", Machine: "n2-standard-2", MachineMode: "exact"}
+	for i := 0; i < 3; i++ {
+		if err := createRunnerInstance(context.Background(), labels, "vm", "jit", "owner", "repo"); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	for i, zone := range first {
+		if zone != "zone-a" {
+			t.Fatalf("job %d started in %s, expected the first listed zone", i, zone)
+		}
+	}
+}
+
+// A stockout in one zone and quota in another is not "every zone out of
+// quota": the last failure has to stay visible so operators see the real blocker.
+func TestMixedQuotaAndStockoutKeepsBothErrors(t *testing.T) {
+	withInsert(t, func(_ context.Context, _, zone, _ string, _ *RunnerLabels, _, _ string) error {
+		if zone == "zone-a" {
+			return errors.New("QUOTA_EXCEEDED: cpus")
+		}
+		return errors.New("ZONE_RESOURCE_POOL_EXHAUSTED")
+	})
+
+	labels := &RunnerLabels{Zone: "zone-a+zone-b", Machine: "n2-standard-2", MachineMode: "exact"}
+	err := createRunnerInstance(context.Background(), labels, "vm-3", "jit", "owner", "repo")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "every zone out of quota") {
+		t.Fatalf("mixed failure reported as quota everywhere: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ZONE_RESOURCE_POOL_EXHAUSTED") || !strings.Contains(err.Error(), "zone-a") {
+		t.Fatalf("expected the stockout error and the quota zone to surface, got %v", err)
 	}
 }
 

@@ -101,8 +101,11 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 
 // createRunnerInstance tries every candidate zone. A zone that is out of quota
 // is skipped like any other soft failure, so one exhausted region does not hold
-// up a job the rest of the pool could run; the quota error is only returned if
-// every zone reports one, which leaves Cloud Tasks to retry once capacity frees.
+// up a job the rest of the pool could run. Zones pinned with a zone= label are
+// tried in the order given; pool zones rotate so consecutive jobs spread out.
+// If no zone accepts the job the last failure is returned, flagged as a quota
+// error when at least one zone was out of quota, which leaves Cloud Tasks to
+// retry once capacity frees.
 func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceName, jitConfig, owner, repo string) error {
 	repoFullName := owner + "/" + repo
 	cacheBucket := os.Getenv("GCRUNNER_CACHE_BUCKET")
@@ -121,7 +124,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 	case labels.Zone != "":
 		zones = strings.Split(labels.Zone, "+")
 	case len(configuredZones()) > 0:
-		zones = configuredZones()
+		zones = rotate(configuredZones(), nextZoneOffset())
 	default:
 		var zoneErr error
 		zones, zoneErr = ListZones(ctx, project, region)
@@ -129,11 +132,11 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			log.Printf("Failed to discover zones for %s, using fallback: %v", region, zoneErr)
 			zones = []string{region + "-a", region + "-b", region + "-c"}
 		}
+		zones = rotate(zones, nextZoneOffset())
 	}
-	zones = rotate(zones, nextZoneOffset())
 
 	var lastErr error
-	var quotaErr error
+	var outOfQuota []string
 	for _, zone := range zones {
 		// Resolve machine type per zone if not exact
 		machineType := labels.Machine
@@ -159,7 +162,8 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			log.Printf("VM %s already exists in %s (duplicate webhook), skipping", instanceName, zone)
 			return nil
 		case insertErrorQuota:
-			quotaErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
+			outOfQuota = append(outOfQuota, zone)
+			lastErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
 			log.Printf("Out of quota in %s, trying next zone", zone)
 		case insertErrorFatal:
 			return fmt.Errorf("failed to create VM in %s: %w", zone, err)
@@ -169,8 +173,11 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		}
 	}
 
-	if quotaErr != nil {
-		return fmt.Errorf("every zone out of quota: %w", quotaErr)
+	if len(outOfQuota) == len(zones) {
+		return fmt.Errorf("every zone out of quota: %w", lastErr)
+	}
+	if len(outOfQuota) > 0 {
+		return fmt.Errorf("failed to create VM in any zone (out of quota in %s): %w", strings.Join(outOfQuota, ", "), lastErr)
 	}
 
 	return fmt.Errorf("failed to create VM in any zone: %w", lastErr)

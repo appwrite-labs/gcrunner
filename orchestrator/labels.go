@@ -5,8 +5,8 @@ import "strings"
 // RunnerLabels holds the parsed gcrunner label configuration.
 type RunnerLabels struct {
 	RunID    string
-	Machine  string   // Exact machine type (e.g. "n2d-standard-4", "e2-micro")
-	Family   string   // Machine family for resolution (e.g. "n2d", "n2d+c3")
+	Machine  string // Exact machine type (e.g. "n2d-standard-4", "e2-micro")
+	Family   string // Machine family for resolution (e.g. "n2d", "n2d+c3")
 	Spot     bool
 	Disk     string
 	DiskType string
