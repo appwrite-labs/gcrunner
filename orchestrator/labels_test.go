@@ -192,3 +192,18 @@ func TestParseLabels_NotGcrunner(t *testing.T) {
 		t.Errorf("expected nil for non-gcrunner labels, got %+v", labels)
 	}
 }
+
+func TestParseLabels_ExplicitDefaultMachineStaysExact(t *testing.T) {
+	// Naming the default machine explicitly is still an exact request, so
+	// cpu= must not flip the job into auto mode and resolve a bigger machine.
+	labels := parseLabels([]string{"gcrunner=test/machine=n2d-standard-2/cpu=4"})
+	if labels == nil {
+		t.Fatal("expected labels, got nil")
+	}
+	if labels.MachineMode != "exact" {
+		t.Errorf("MachineMode = %q, want %q", labels.MachineMode, "exact")
+	}
+	if labels.Machine != "n2d-standard-2" {
+		t.Errorf("Machine = %q, want %q", labels.Machine, "n2d-standard-2")
+	}
+}
