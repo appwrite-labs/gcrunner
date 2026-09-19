@@ -12,6 +12,8 @@ Every job gets an Artifact Registry repository it can push to and pull from with
 | `GCRUNNER_REGISTRY` | The repository jobs push to. Lives in the deployment region. |
 | `GCRUNNER_REGISTRY_PULL` | A read-through cache of that repository in the VM's own region. Pull from this. |
 
+Both are repository prefixes. Artifact Registry stores images under the repository, so a reference is always `${GCRUNNER_REGISTRY}/<image>:<tag>`, never `${GCRUNNER_REGISTRY}:<tag>`.
+
 Both point at the same repository when the VM runs in the deployment region. In any other region listed in the `zones` pool, `GCRUNNER_REGISTRY_PULL` is a regional remote repository that fetches an image from `GCRUNNER_REGISTRY` on its first pull and serves it locally afterwards, so cross-region transfer happens once per region, not once per job.
 
 Images expire after `registry_retention_days` (default 10), in the registry and in every regional cache.
@@ -29,13 +31,13 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.GCRUNNER_REGISTRY }}:app-${{ github.sha }}
+          tags: ${{ env.GCRUNNER_REGISTRY }}/app:${{ github.sha }}
 
   test:
     needs: build
     runs-on: gcrunner=${{ github.run_id }}
     steps:
-      - run: docker run --rm "${GCRUNNER_REGISTRY_PULL}:app-${GITHUB_SHA}" make test
+      - run: docker run --rm "${GCRUNNER_REGISTRY_PULL}/app:${GITHUB_SHA}" make test
 ```
 
 ## Cache Docker layers
@@ -47,9 +49,9 @@ Point the BuildKit registry cache at the same repository:
         with:
           context: .
           push: true
-          tags: ${{ env.GCRUNNER_REGISTRY }}:app-${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.GCRUNNER_REGISTRY }}:app-buildcache
-          cache-to: type=registry,ref=${{ env.GCRUNNER_REGISTRY }}:app-buildcache,mode=max
+          tags: ${{ env.GCRUNNER_REGISTRY }}/app:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.GCRUNNER_REGISTRY }}/app:buildcache
+          cache-to: type=registry,ref=${{ env.GCRUNNER_REGISTRY }}/app:buildcache,mode=max
 ```
 
 ## How authentication works
