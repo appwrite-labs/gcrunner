@@ -1,15 +1,19 @@
 package function
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,11 +24,19 @@ const configPath = ".github/gcrunner.yml"
 // cannot mend it, so the job is left queued with the reason logged.
 var errConfiguration = errors.New("configuration error")
 
+// errConfigForbidden reports an App installation that has not been granted
+// read access to repository contents, so the file cannot be read at all.
+var errConfigForbidden = errors.New("the gcrunner GitHub App has no read access to repository contents")
+
 // RepositoryConfig is the parsed .github/gcrunner.yml. A repository without
 // one gets the zero value, which resolves every job from its labels alone.
 type RepositoryConfig struct {
 	Runners map[string]RunnerPreset    `yaml:"runners"`
 	Images  map[string]ImageDefinition `yaml:"images"`
+
+	// unreadable is set when the file could not be read for lack of
+	// permission, so a job that depends on it is held rather than guessed at.
+	unreadable bool
 }
 
 // RunnerPreset is a named set of runner settings a job selects with runner=.
@@ -48,6 +60,25 @@ type ImageDefinition struct {
 	Project string `yaml:"project"`
 	Family  string `yaml:"family"`
 	Name    string `yaml:"name"`
+}
+
+var (
+	rangePattern = regexp.MustCompile(`^[0-9]+(\+[0-9]+)?$`)
+	diskPattern  = regexp.MustCompile(`(?i)^[0-9]+(gb)?$`)
+)
+
+// validate rejects values the labels would misread, so a typo holds the job
+// with a message instead of provisioning a machine nobody asked for.
+func (p RunnerPreset) validate() error {
+	for key, value := range map[string]string{labelCPU: string(p.CPU), labelRAM: string(p.RAM)} {
+		if value != "" && !rangePattern.MatchString(value) {
+			return fmt.Errorf("%s: %q is not a count or a min+max range", key, value)
+		}
+	}
+	if p.Disk != "" && !diskPattern.MatchString(p.Disk) {
+		return fmt.Errorf("%s: %q is not a size like 100gb", labelDisk, p.Disk)
+	}
+	return nil
 }
 
 // Joined is a label value that YAML may write as a scalar or a list. A list
@@ -121,6 +152,9 @@ func (d ImageDefinition) path(defaultProject string) (string, error) {
 func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*RunnerLabels, error) {
 	var preset Settings
 	if job.Runner != "" {
+		if c.unreadable {
+			return nil, fmt.Errorf("%w: runner %q needs %s, but %v", errConfiguration, job.Runner, configPath, errConfigForbidden)
+		}
 		definition, ok := c.Runners[job.Runner]
 		if !ok {
 			return nil, fmt.Errorf("%w: runner %q is not defined in %s", errConfiguration, job.Runner, configPath)
@@ -138,10 +172,19 @@ func (c *RepositoryConfig) resolve(job *JobLabels, imageProject string) (*Runner
 	return runner, nil
 }
 
+// parseRepositoryConfig decodes the file, refusing keys it does not know so a
+// misspelt setting is reported rather than dropped.
 func parseRepositoryConfig(data []byte) (*RepositoryConfig, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
 	var config RepositoryConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%w: parse %s: %v", errConfiguration, configPath, err)
+	}
+	for name, preset := range config.Runners {
+		if err := preset.validate(); err != nil {
+			return nil, fmt.Errorf("%w: runner %q in %s: %v", errConfiguration, name, configPath, err)
+		}
 	}
 	return &config, nil
 }
@@ -159,11 +202,14 @@ func configRef(event WorkflowJobEvent) string {
 
 // ConfigCache keeps parsed configs by commit. Only immutable refs are cached;
 // a branch name is read fresh so an edit to the file shows up on the next job.
+// Concurrent misses for one key share a single fetch, so a workflow fanning
+// out twenty jobs at once reads the file once.
 type ConfigCache struct {
 	mu      sync.RWMutex
 	configs map[string]configCacheEntry
 	ttl     time.Duration
 	nowFunc func() time.Time
+	group   singleflight.Group
 }
 
 type configCacheEntry struct {
@@ -181,16 +227,25 @@ var configCache = &ConfigCache{
 var fetchRepositoryFile = fetchRepositoryContents
 
 // loadRepositoryConfig reads the repository's .github/gcrunner.yml for this
-// job. A missing file, or an App installation that has not been granted
-// contents access yet, yields an empty config so jobs that never reference the
-// file keep running.
+// job. A missing file yields an empty config. An App installation that has not
+// been granted contents access yet yields a config marked unreadable, so jobs
+// that never reference the file keep running while jobs that select a runner
+// are held until the permission is accepted.
 func loadRepositoryConfig(ctx context.Context, event WorkflowJobEvent) (*RepositoryConfig, error) {
 	owner := event.Repository.Owner.Login
 	repo := event.Repository.Name
 	ref := configRef(event)
-	return configCache.load(ctx, owner, repo, ref, isCommitSHA(ref))
+	config, err := configCache.load(ctx, owner, repo, ref, isCommitSHA(ref))
+	if errors.Is(err, errConfigForbidden) {
+		log.Printf("Cannot read %s in %s/%s: %v", configPath, owner, repo, err)
+		return &RepositoryConfig{unreadable: true}, nil
+	}
+	return config, err
 }
 
+// load returns the parsed file at ref. A permission failure is never cached,
+// so the first job after an administrator accepts the permission reads the
+// file.
 func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheable bool) (*RepositoryConfig, error) {
 	key := owner + "/" + repo + "@" + ref
 	now := c.nowFunc()
@@ -204,29 +259,34 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 		}
 	}
 
-	data, err := fetchRepositoryFile(ctx, owner, repo, configPath, ref)
-	var config *RepositoryConfig
-	switch {
-	case err == nil && data == nil:
-		config = &RepositoryConfig{}
-	case err == nil:
-		config, err = parseRepositoryConfig(data)
-		if err != nil {
-			return nil, err
+	result, err, _ := c.group.Do(key, func() (any, error) {
+		data, err := fetchRepositoryFile(ctx, owner, repo, configPath, ref)
+		var config *RepositoryConfig
+		switch {
+		case err == nil && data == nil:
+			config = &RepositoryConfig{}
+		case err == nil:
+			config, err = parseRepositoryConfig(data)
+			if err != nil {
+				return nil, err
+			}
+		case isForbidden(err):
+			return nil, fmt.Errorf("%w: %v", errConfigForbidden, err)
+		default:
+			return nil, fmt.Errorf("read %s in %s/%s at %s: %w", configPath, owner, repo, ref, err)
 		}
-	case isForbidden(err):
-		log.Printf("Cannot read %s in %s/%s, grant the gcrunner GitHub App read access to repository contents: %v", configPath, owner, repo, err)
-		config = &RepositoryConfig{}
-	default:
-		return nil, fmt.Errorf("read %s in %s/%s at %s: %w", configPath, owner, repo, ref, err)
-	}
 
-	if cacheable {
-		c.mu.Lock()
-		c.configs[key] = configCacheEntry{config: config, fetchedAt: now}
-		c.mu.Unlock()
+		if cacheable {
+			c.mu.Lock()
+			c.configs[key] = configCacheEntry{config: config, fetchedAt: now}
+			c.mu.Unlock()
+		}
+		return config, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return config, nil
+	return result.(*RepositoryConfig), nil
 }
 
 func isCommitSHA(ref string) bool {

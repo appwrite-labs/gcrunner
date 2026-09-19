@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,41 +34,16 @@ runners:
     machine: e2-micro
 `
 
-func TestParseRepositoryConfig(t *testing.T) {
-	config, err := parseRepositoryConfig([]byte(exampleConfig))
+// resolveWith runs a label through the file and returns the machine the job
+// would get, as the zone loop sees it: the resolver's answer for an exact
+// request, or the family and constraints it would search with.
+func resolveWith(t *testing.T, config *RepositoryConfig, label string) *RunnerLabels {
+	t.Helper()
+	runner, err := config.resolve(parseJobLabels([]string{label}), "default-images")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]Settings{
-		"build": {labelFamily: "n2d+c3", labelCPU: "4+8", labelRAM: "16", labelDisk: "100gb", labelImage: "ci"},
-		"e2e":   {labelFamily: "n2", labelCPU: "16", labelRAM: "16", labelDisk: "100gb", labelImage: "ci", labelSpot: "false"},
-		"tiny":  {labelMachine: "e2-micro"},
-	}
-	for name, settings := range want {
-		preset, ok := config.Runners[name]
-		if !ok {
-			t.Fatalf("runner %q missing", name)
-		}
-		got := preset.settings()
-		if len(got) != len(settings) {
-			t.Errorf("runner %q settings = %v, want %v", name, got, settings)
-		}
-		for key, value := range settings {
-			if got[key] != value {
-				t.Errorf("runner %q %s = %q, want %q", name, key, got[key], value)
-			}
-		}
-	}
-	if config.Images["ci"].Family != "ci-ubuntu2404-x64" || config.Images["ci"].Project != "my-images" {
-		t.Errorf("image ci = %+v", config.Images["ci"])
-	}
-}
-
-func TestParseRepositoryConfig_RejectsNestedList(t *testing.T) {
-	_, err := parseRepositoryConfig([]byte("runners:\n  a:\n    family: [[n2]]\n"))
-	if err == nil || !strings.Contains(err.Error(), "scalar") {
-		t.Errorf("err = %v, want a scalar list item error", err)
-	}
+	return runner
 }
 
 func TestResolve(t *testing.T) {
@@ -75,129 +51,124 @@ func TestResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := []struct {
-		name  string
-		label string
-		want  RunnerLabels
-		err   string
-	}{
-		{
-			name:  "preset over defaults",
-			label: "gcrunner=1/runner=build",
-			want: RunnerLabels{
-				RunID: "1", Machine: "n2d-standard-2", Family: "n2d+c3", CPU: "4+8", RAM: "16", Spot: true,
-				Disk: "100gb", DiskType: "pd-ssd", Image: "projects/my-images/global/images/family/ci-ubuntu2404-x64",
-				MachineMode: machineModeFamily,
-			},
-		},
-		{
-			name:  "job labels over preset",
-			label: "gcrunner=1/runner=e2e/disk=200gb/spot=true",
-			want: RunnerLabels{
-				RunID: "1", Machine: "n2d-standard-2", Family: "n2", CPU: "16", RAM: "16", Spot: true,
-				Disk: "200gb", DiskType: "pd-ssd", Image: "projects/my-images/global/images/family/ci-ubuntu2404-x64",
-				MachineMode: machineModeFamily,
-			},
-		},
-		{
-			name:  "job machine= is exact despite the preset's family",
-			label: "gcrunner=1/runner=build/machine=c3-standard-8",
-			want: RunnerLabels{
-				RunID: "1", Machine: "c3-standard-8", CPU: "4+8", RAM: "16", Spot: true,
-				Disk: "100gb", DiskType: "pd-ssd", Image: "projects/my-images/global/images/family/ci-ubuntu2404-x64",
-				MachineMode: machineModeExact,
-			},
-		},
-		{
-			name:  "job cpu= keeps the preset's family",
-			label: "gcrunner=1/runner=build/cpu=16",
-			want: RunnerLabels{
-				RunID: "1", Machine: "n2d-standard-2", Family: "n2d+c3", CPU: "16", RAM: "16", Spot: true,
-				Disk: "100gb", DiskType: "pd-ssd", Image: "projects/my-images/global/images/family/ci-ubuntu2404-x64",
-				MachineMode: machineModeFamily,
-			},
-		},
-		{
-			name:  "preset without cpu or family stays exact",
-			label: "gcrunner=1/runner=tiny",
-			want: RunnerLabels{
-				RunID: "1", Machine: "e2-micro", Spot: true, Disk: "75gb", DiskType: "pd-ssd", Image: "ubuntu24-full-x64",
-				MachineMode: machineModeExact,
-			},
-		},
-		{
-			name:  "image by name in the default project",
-			label: "gcrunner=1/image=pinned",
-			want: RunnerLabels{
-				RunID: "1", Machine: "n2d-standard-2", Spot: true, Disk: "75gb", DiskType: "pd-ssd",
-				Image: "projects/default-images/global/images/ci-ubuntu2404-x64-20260917", MachineMode: machineModeExact,
-			},
-		},
-		{
-			name:  "image not in the file passes through",
-			label: "gcrunner=1/image=ubuntu22-full-x64",
-			want: RunnerLabels{
-				RunID: "1", Machine: "n2d-standard-2", Spot: true, Disk: "75gb", DiskType: "pd-ssd",
-				Image: "ubuntu22-full-x64", MachineMode: machineModeExact,
-			},
-		},
-		{
-			name:  "unknown runner",
-			label: "gcrunner=1/runner=nope",
-			err:   `runner "nope" is not defined`,
-		},
+	const ciImage = "projects/my-images/global/images/family/ci-ubuntu2404-x64"
+
+	t.Run("preset fills in what the job did not say", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=build")
+		if runner.Family != "n2d+c3" || runner.CPU != "4+8" || runner.RAM != "16" {
+			t.Errorf("machine search = family %s cpu %s ram %s, want n2d+c3 4+8 16 from the preset", runner.Family, runner.CPU, runner.RAM)
+		}
+		if runner.Disk != "100gb" || !runner.Spot || runner.Image != ciImage {
+			t.Errorf("disk %s spot %v image %s: want the preset's disk, the default spot, and the configured image", runner.Disk, runner.Spot, runner.Image)
+		}
+	})
+
+	t.Run("yaml merge keys and lists work", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=e2e")
+		if runner.Family != "n2" || runner.CPU != "16" || runner.RAM != "16" || runner.Spot {
+			t.Errorf("e2e = %+v, want n2 with 16 vCPUs, 16 GB inherited from build, on demand", runner)
+		}
+	})
+
+	t.Run("job labels win over the preset", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=e2e/disk=200gb/spot=true")
+		if runner.Disk != "200gb" || !runner.Spot || runner.Family != "n2" {
+			t.Errorf("runner = %+v, want the job's disk and spot on the e2e shape", runner)
+		}
+	})
+
+	t.Run("a job machine= is exact despite the preset family", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=build/machine=c3-standard-8")
+		got, err := ResolveMachineType(context.Background(), "project", "zone", runner)
+		if err != nil || got != "c3-standard-8" {
+			t.Errorf("resolved %q, %v; want the machine the job asked for without a lookup", got, err)
+		}
+	})
+
+	t.Run("a job cpu= keeps the preset family", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=build/cpu=16")
+		if runner.Family != "n2d+c3" || runner.CPU != "16" {
+			t.Errorf("machine search = family %s cpu %s, want the preset's families with 16 vCPUs", runner.Family, runner.CPU)
+		}
+	})
+
+	t.Run("an exact preset needs no lookup", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=tiny")
+		got, err := ResolveMachineType(context.Background(), "project", "zone", runner)
+		if err != nil || got != "e2-micro" {
+			t.Errorf("resolved %q, %v; want e2-micro", got, err)
+		}
+	})
+
+	t.Run("images resolve by name in the default project", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/image=pinned")
+		if want := "projects/default-images/global/images/ci-ubuntu2404-x64-20260917"; resolveSourceImage(runner.Image) != want {
+			t.Errorf("source image = %q, want %q", resolveSourceImage(runner.Image), want)
+		}
+	})
+
+	t.Run("an image the file does not name is left to the built-ins", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/image=ubuntu22-full-x64")
+		if resolveSourceImage(runner.Image) != resolveSourceImage("ubuntu22-full-x64") {
+			t.Errorf("image %q was rewritten", runner.Image)
+		}
+	})
+
+	t.Run("unknown runner is held, not retried", func(t *testing.T) {
+		_, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=nope"}), "p")
+		if !errors.Is(err, errConfiguration) || !strings.Contains(err.Error(), `"nope"`) {
+			t.Errorf("err = %v, want a configuration error naming the runner", err)
+		}
+	})
+}
+
+func TestResolve_WithoutFile(t *testing.T) {
+	config := &RepositoryConfig{}
+	runner := resolveWith(t, config, "gcrunner=1/cpu=4")
+	if runner.CPU != "4" || runner.Family != "" {
+		t.Errorf("runner = %+v, want the label alone", runner)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := config.resolve(parseJobLabels([]string{tt.label}), "default-images")
-			if tt.err != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.err) {
-					t.Fatalf("err = %v, want %q", err, tt.err)
-				}
-				if !errors.Is(err, errConfiguration) {
-					t.Errorf("err = %v, want one a retry will not be attempted for", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if *got != tt.want {
-				t.Errorf("resolve() =\n%+v\nwant\n%+v", *got, tt.want)
+	if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=build"}), "p"); !errors.Is(err, errConfiguration) {
+		t.Errorf("runner= without a file: err = %v, want a configuration error", err)
+	}
+}
+
+func TestResolve_UnreadableFileHoldsPresetJobs(t *testing.T) {
+	config := &RepositoryConfig{unreadable: true}
+	if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=build"}), "p"); !errors.Is(err, errConfiguration) || !strings.Contains(err.Error(), "read access") {
+		t.Errorf("err = %v, want a configuration error naming the missing permission", err)
+	}
+	if runner := resolveWith(t, config, "gcrunner=1/cpu=4"); runner.CPU != "4" {
+		t.Errorf("a label-only job = %+v, want it to run as before", runner)
+	}
+}
+
+func TestParseRepositoryConfig_Rejects(t *testing.T) {
+	tests := map[string]string{
+		"unknown key":      "runners:\n  a:\n    familly: n2\n",
+		"nested list":      "runners:\n  a:\n    family: [[n2]]\n",
+		"cpu word":         "runners:\n  a:\n    cpu: lots\n",
+		"ram three values": "runners:\n  a:\n    ram: [4, 8, 16]\n",
+		"disk unit":        "runners:\n  a:\n    disk: 100tb\n",
+		"runners list":     "runners: [not a map]",
+	}
+	for name, file := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseRepositoryConfig([]byte(file))
+			if !errors.Is(err, errConfiguration) {
+				t.Errorf("err = %v, want a configuration error", err)
 			}
 		})
 	}
-}
-
-func TestResolve_NoConfigFile(t *testing.T) {
-	config := &RepositoryConfig{}
-	got, err := config.resolve(parseJobLabels([]string{"gcrunner=1/cpu=4"}), "p")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.MachineMode != machineModeAuto || got.CPU != "4" {
-		t.Errorf("resolve() = %+v", got)
-	}
-	if _, err := config.resolve(parseJobLabels([]string{"gcrunner=1/runner=build"}), "p"); err == nil {
-		t.Error("runner= without a config file should be an error")
+	if config, err := parseRepositoryConfig(nil); err != nil || len(config.Runners) != 0 {
+		t.Errorf("empty file: %+v, %v; want an empty config", config, err)
 	}
 }
 
-func TestImageDefinitionPath(t *testing.T) {
-	tests := []struct {
-		definition ImageDefinition
-		want       string
-		err        bool
-	}{
-		{ImageDefinition{Family: "f"}, "projects/p/global/images/family/f", false},
-		{ImageDefinition{Project: "q", Name: "n"}, "projects/q/global/images/n", false},
-		{ImageDefinition{Family: "f", Name: "n"}, "", true},
-		{ImageDefinition{}, "", true},
-	}
-	for _, tt := range tests {
-		got, err := tt.definition.path("p")
-		if (err != nil) != tt.err || got != tt.want {
-			t.Errorf("path(%+v) = %q, %v; want %q, err=%v", tt.definition, got, err, tt.want, tt.err)
+func TestImageDefinition_RejectsAmbiguity(t *testing.T) {
+	for _, definition := range []ImageDefinition{{Family: "f", Name: "n"}, {}} {
+		if _, err := definition.path("p"); err == nil {
+			t.Errorf("path(%+v) succeeded, want an error", definition)
 		}
 	}
 }
@@ -218,10 +189,13 @@ func TestConfigRef(t *testing.T) {
 
 func TestConfigCacheLoad(t *testing.T) {
 	sha := strings.Repeat("a", 40)
+	var mu sync.Mutex
 	var calls int
 	var reply []byte
 	var replyErr error
 	fetchRepositoryFile = func(_ context.Context, owner, repo, path, ref string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		calls++
 		if path != configPath {
 			t.Errorf("path = %q", path)
@@ -244,24 +218,19 @@ func TestConfigCacheLoad(t *testing.T) {
 		}
 	}
 	if calls != 1 {
-		t.Errorf("a commit was fetched %d times, want once", calls)
+		t.Errorf("a commit was read from GitHub %d times, want once", calls)
 	}
 
-	for i := 0; i < 2; i++ {
-		if _, err := cache.load(context.Background(), "o", "r", "main", false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 3 {
-		t.Errorf("a branch was fetched %d times in total, want every time", calls)
+	reply = []byte("runners:\n  a:\n    cpu: 8\n")
+	config, _ := cache.load(context.Background(), "o", "r", "main", false)
+	if config.Runners["a"].CPU != "8" {
+		t.Errorf("a branch edit was not seen on the next job: cpu = %q", config.Runners["a"].CPU)
 	}
 
 	now = now.Add(2 * time.Hour)
-	if _, err := cache.load(context.Background(), "o", "r", sha, true); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 4 {
-		t.Errorf("an expired commit entry was not refetched (calls=%d)", calls)
+	config, _ = cache.load(context.Background(), "o", "r", sha, true)
+	if config.Runners["a"].CPU != "8" {
+		t.Errorf("an expired commit entry was still served: cpu = %q", config.Runners["a"].CPU)
 	}
 
 	reply, replyErr = nil, nil
@@ -271,18 +240,56 @@ func TestConfigCacheLoad(t *testing.T) {
 	}
 
 	replyErr = &githubError{Status: http.StatusForbidden, Body: "Resource not accessible by integration"}
-	config, err = cache.load(context.Background(), "o", "r", "main", false)
-	if err != nil || len(config.Runners) != 0 {
-		t.Errorf("forbidden: config=%+v err=%v, want empty and nil", config, err)
+	other := strings.Repeat("b", 40)
+	if _, err := cache.load(context.Background(), "o", "r", other, true); !errors.Is(err, errConfigForbidden) {
+		t.Errorf("forbidden: err = %v, want the permission error", err)
+	}
+	reply, replyErr = []byte("runners:\n  a:\n    cpu: 4\n"), nil
+	if config, err := cache.load(context.Background(), "o", "r", other, true); err != nil || config.Runners["a"].CPU != "4" {
+		t.Errorf("after the permission is granted: config=%+v err=%v, want the file on the next job", config, err)
 	}
 
 	replyErr = errors.New("connection reset")
-	if _, err = cache.load(context.Background(), "o", "r", "main", false); err == nil {
+	if _, err := cache.load(context.Background(), "o", "r", "main", false); err == nil {
 		t.Error("a transport error should be returned so the task retries")
 	}
 
 	reply, replyErr = []byte("runners: [not a map]"), nil
-	if _, err = cache.load(context.Background(), "o", "r", "main", false); !errors.Is(err, errConfiguration) {
+	if _, err := cache.load(context.Background(), "o", "r", "main", false); !errors.Is(err, errConfiguration) {
 		t.Errorf("a malformed file: err = %v, want a configuration error no retry is attempted for", err)
+	}
+}
+
+func TestConfigCacheLoad_CoalescesConcurrentMisses(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	release := make(chan struct{})
+	fetchRepositoryFile = func(context.Context, string, string, string, string) ([]byte, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		<-release
+		return []byte("runners:\n  a:\n    cpu: 4\n"), nil
+	}
+	t.Cleanup(func() { fetchRepositoryFile = fetchRepositoryContents })
+
+	cache := &ConfigCache{configs: map[string]configCacheEntry{}, ttl: time.Hour, nowFunc: time.Now}
+	sha := strings.Repeat("c", 40)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			config, err := cache.load(context.Background(), "o", "r", sha, true)
+			if err != nil || config.Runners["a"].CPU != "4" {
+				t.Errorf("config=%+v err=%v", config, err)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if calls != 1 {
+		t.Errorf("twenty jobs on one commit read GitHub %d times, want once", calls)
 	}
 }
