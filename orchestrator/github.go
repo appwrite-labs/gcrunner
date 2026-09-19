@@ -222,15 +222,18 @@ func signJWT(appID int64, key *rsa.PrivateKey) (string, error) {
 	return token.SignedString(key)
 }
 
-// fetchRepositoryContents returns a file from the repository at ref, or nil
-// when the repository has no such file.
+// fetchRepositoryContents returns a file from the repository at ref, or from
+// the default branch when ref is "", or nil when the repository has no such
+// file.
 func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string) ([]byte, error) {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
-	query := url.Values{"ref": {ref}}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?%s", owner, repo, path, query.Encode())
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, path)
+	if ref != "" {
+		endpoint += "?" + url.Values{"ref": {ref}}.Encode()
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
