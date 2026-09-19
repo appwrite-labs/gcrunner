@@ -414,18 +414,18 @@ func imageProject() string {
 }
 
 func resolveSourceImage(image string) string {
-	imageProject := imageProject()
+	project := imageProject()
 	imageMap := map[string]string{
 		"ubuntu24-full-x64": "gcrunner-ubuntu2404-x64",
 		"ubuntu22-full-x64": "gcrunner-ubuntu2204-x64",
 	}
 	if family, ok := imageMap[image]; ok {
-		return fmt.Sprintf("projects/%s/global/images/family/%s", imageProject, family)
+		return fmt.Sprintf("projects/%s/global/images/family/%s", project, family)
 	}
 	if strings.Contains(image, "/") {
 		return image
 	}
-	return fmt.Sprintf("projects/%s/global/images/%s", imageProject, image)
+	return fmt.Sprintf("projects/%s/global/images/%s", project, image)
 }
 
 func parseDiskSize(disk string) int64 {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -45,8 +46,8 @@ func generateJITConfig(ctx context.Context, owner, repo, runnerName string, labe
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/generate-jitconfig", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(bodyJSON)))
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/generate-jitconfig", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(bodyJSON)))
 	if err != nil {
 		return "", err
 	}
@@ -81,8 +82,8 @@ func getRegistrationToken(ctx context.Context, owner, repo string) (string, erro
 		return "", fmt.Errorf("get installation token: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/registration-token", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/registration-token", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -122,8 +123,8 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 		return "", fmt.Errorf("get installation ID: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -152,8 +153,8 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 
 // getInstallationID finds the installation ID for a given owner (org or user).
 func getInstallationID(ctx context.Context, appJWT, owner string) (int64, error) {
-	url := fmt.Sprintf("https://api.github.com/users/%s/installation", owner)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/users/%s/installation", owner)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -228,8 +229,9 @@ func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	query := url.Values{"ref": {ref}}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?%s", owner, repo, path, query.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +280,8 @@ func findRunner(ctx context.Context, owner, repo, name string) (*runnerRecord, e
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners?name=%s", owner, repo, name)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners?name=%s", owner, repo, name)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -330,8 +332,8 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/%d", owner, repo, runner.ID)
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/%d", owner, repo, runner.ID)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", endpoint, nil)
 	if err != nil {
 		return err
 	}

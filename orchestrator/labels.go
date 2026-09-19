@@ -99,13 +99,19 @@ func parseLabels(labels []string) *RunnerLabels {
 }
 
 // runner lays the preset over the defaults and the job's own settings over
-// both. Machine mode comes from the explicit layers. A job that writes
-// machine= wants that machine, so a family= inherited from its preset is
-// dropped rather than left to outrank it.
+// both. Machine mode comes from the explicit layers, and the job's choice of
+// how to pick a machine beats the preset's: a job that writes machine= wants
+// that machine, so a family= inherited from its preset is dropped rather than
+// left to outrank it, and a job that writes cpu= or ram= wants a machine that
+// fits, so a machine= inherited from its preset is dropped rather than left
+// to make the constraint a no-op.
 func (j *JobLabels) runner(preset Settings) *RunnerLabels {
 	explicit := merge(preset, j.Settings)
 	if j.Settings[labelMachine] != "" && j.Settings[labelFamily] == "" {
 		delete(explicit, labelFamily)
+	}
+	if j.Settings[labelMachine] == "" && (j.Settings[labelCPU] != "" || j.Settings[labelRAM] != "") {
+		delete(explicit, labelMachine)
 	}
 	settings := merge(defaultSettings, explicit)
 	return &RunnerLabels{

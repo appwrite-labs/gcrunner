@@ -282,6 +282,7 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 
 		if cacheable {
 			c.mu.Lock()
+			c.evictExpired(now)
 			c.configs[key] = configCacheEntry{config: config, fetchedAt: now}
 			c.mu.Unlock()
 		}
@@ -291,6 +292,17 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 		return nil, err
 	}
 	return result.(*RepositoryConfig), nil
+}
+
+// evictExpired drops entries past their TTL so a busy repository does not
+// grow the map by one entry per commit for the instance's lifetime. Called
+// with the write lock held.
+func (c *ConfigCache) evictExpired(now time.Time) {
+	for key, entry := range c.configs {
+		if now.Sub(entry.fetchedAt) >= c.ttl {
+			delete(c.configs, key)
+		}
+	}
 }
 
 func isCommitSHA(ref string) bool {

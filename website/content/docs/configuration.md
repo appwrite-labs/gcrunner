@@ -39,7 +39,7 @@ jobs:
     runs-on: gcrunner=${{ github.run_id }}/runner=e2e/disk=200gb
 ```
 
-Labels on the job still apply and win over the preset, so `runner=e2e/disk=200gb` is the `e2e` shape with a bigger disk. A `machine=` on the job is an exact request even when its preset sets a `family`.
+Labels on the job still apply and win over the preset, so `runner=e2e/disk=200gb` is the `e2e` shape with a bigger disk. A `machine=` on the job is an exact request even when its preset sets a `family`, and a `cpu=` or `ram=` on the job replaces a `machine` the preset pinned, so the constraint is honoured rather than ignored.
 
 YAML anchors and merge keys work, which keeps a file with many similar runners short.
 
@@ -54,7 +54,7 @@ Edits to the file on a public repository take effect once merged.
 
 ## Permissions
 
-Reading the file needs the gcrunner GitHub App to have **read access to repository contents**. New Apps created through the setup page request it. An App created before this permission existed shows a pending permission request under the organization's installed GitHub Apps; until an admin accepts it, jobs that reference `runner=` or a configured image stay queued and the orchestrator logs why. Jobs that only use labels keep running either way.
+Reading the file needs the gcrunner GitHub App to have **read access to repository contents**. New Apps created through the setup page request it. An App created before this permission existed shows a pending permission request under the organization's installed GitHub Apps; until an admin accepts it, jobs that reference `runner=` stay queued and the orchestrator logs why. Jobs that only use labels keep running either way, including an `image=` that names an image the file would have defined: without the file that name is passed to GCE as-is, so keep such jobs on a built-in image or a full image path until the permission is in place.
 
 ## `runners`
 

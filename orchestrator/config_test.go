@@ -92,6 +92,13 @@ func TestResolve(t *testing.T) {
 		}
 	})
 
+	t.Run("a job cpu= replaces the preset's pinned machine", func(t *testing.T) {
+		runner := resolveWith(t, config, "gcrunner=1/runner=tiny/cpu=8")
+		if runner.Machine == "e2-micro" || runner.CPU != "8" || runner.MachineMode == machineModeExact {
+			t.Errorf("runner = %+v, want a machine resolved for 8 vCPUs, not e2-micro", runner)
+		}
+	})
+
 	t.Run("an exact preset needs no lookup", func(t *testing.T) {
 		runner := resolveWith(t, config, "gcrunner=1/runner=tiny")
 		got, err := ResolveMachineType(context.Background(), "project", "zone", runner)
@@ -231,6 +238,12 @@ func TestConfigCacheLoad(t *testing.T) {
 	config, _ = cache.load(context.Background(), "o", "r", sha, true)
 	if config.Runners["a"].CPU != "8" {
 		t.Errorf("an expired commit entry was still served: cpu = %q", config.Runners["a"].CPU)
+	}
+	cache.load(context.Background(), "o", "r", strings.Repeat("d", 40), true)
+	now = now.Add(2 * time.Hour)
+	cache.load(context.Background(), "o", "r", strings.Repeat("e", 40), true)
+	if len(cache.configs) != 1 {
+		t.Errorf("%d entries kept after every earlier commit expired, want only the newest", len(cache.configs))
 	}
 
 	reply, replyErr = nil, nil
