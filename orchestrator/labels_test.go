@@ -1,6 +1,9 @@
 package function
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestParseLabels_ExactMachine(t *testing.T) {
 	labels := parseLabels([]string{"gcrunner=test/machine=n2-standard-4"})
@@ -193,17 +196,19 @@ func TestParseLabels_NotGcrunner(t *testing.T) {
 	}
 }
 
-func TestParseLabels_ExplicitDefaultMachineStaysExact(t *testing.T) {
+func TestResolveMachineType_ExplicitDefaultMachineWithCPU(t *testing.T) {
 	// Naming the default machine explicitly is still an exact request, so
-	// cpu= must not flip the job into auto mode and resolve a bigger machine.
+	// cpu= must not resolve a bigger machine instead. An exact request never
+	// lists machine types, so no GCE access is needed here.
 	labels := parseLabels([]string{"gcrunner=test/machine=n2d-standard-2/cpu=4"})
 	if labels == nil {
 		t.Fatal("expected labels, got nil")
 	}
-	if labels.MachineMode != "exact" {
-		t.Errorf("MachineMode = %q, want %q", labels.MachineMode, "exact")
+	got, err := ResolveMachineType(context.Background(), "project", "us-central1-a", labels)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if labels.Machine != "n2d-standard-2" {
-		t.Errorf("Machine = %q, want %q", labels.Machine, "n2d-standard-2")
+	if got != "n2d-standard-2" {
+		t.Errorf("resolved %q, want the machine the job asked for", got)
 	}
 }
