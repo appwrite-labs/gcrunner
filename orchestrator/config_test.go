@@ -263,12 +263,17 @@ func TestConfigCacheLoad(t *testing.T) {
 func TestConfigCacheLoad_CoalescesConcurrentMisses(t *testing.T) {
 	var mu sync.Mutex
 	var calls int
+	entered := make(chan struct{})
 	release := make(chan struct{})
-	fetchRepositoryFile = func(context.Context, string, string, string, string) ([]byte, error) {
+	fetchRepositoryFile = func(ctx context.Context, _, _, _, _ string) ([]byte, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
+		close(entered)
 		<-release
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return []byte("runners:\n  a:\n    cpu: 4\n"), nil
 	}
 	t.Cleanup(func() { fetchRepositoryFile = fetchRepositoryContents })
@@ -276,17 +281,26 @@ func TestConfigCacheLoad_CoalescesConcurrentMisses(t *testing.T) {
 	cache := &ConfigCache{configs: map[string]configCacheEntry{}, ttl: time.Hour, nowFunc: time.Now}
 	sha := strings.Repeat("c", 40)
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			config, err := cache.load(context.Background(), "o", "r", sha, true)
-			if err != nil || config.Runners["a"].CPU != "4" {
-				t.Errorf("config=%+v err=%v", config, err)
-			}
-		}()
+	load := func(ctx context.Context) {
+		defer wg.Done()
+		config, err := cache.load(ctx, "o", "r", sha, true)
+		if err != nil || config.Runners["a"].CPU != "4" {
+			t.Errorf("config=%+v err=%v", config, err)
+		}
 	}
-	time.Sleep(50 * time.Millisecond)
+
+	// The first webhook to arrive starts the read and then gives up. The
+	// jobs that arrived alongside it must still get the file.
+	first, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	go load(first)
+	<-entered
+	cancel()
+	for i := 0; i < 19; i++ {
+		wg.Add(1)
+		go load(context.Background())
+	}
+	time.Sleep(20 * time.Millisecond)
 	close(release)
 	wg.Wait()
 	if calls != 1 {

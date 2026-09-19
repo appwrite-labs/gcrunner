@@ -259,8 +259,12 @@ func (c *ConfigCache) load(ctx context.Context, owner, repo, ref string, cacheab
 		}
 	}
 
+	// The fetch is shared by every caller waiting on this key, so it must
+	// outlive the first caller's request: a cancelled webhook would otherwise
+	// fail every job that happened to arrive alongside it.
+	fetchCtx := context.WithoutCancel(ctx)
 	result, err, _ := c.group.Do(key, func() (any, error) {
-		data, err := fetchRepositoryFile(ctx, owner, repo, configPath, ref)
+		data, err := fetchRepositoryFile(fetchCtx, owner, repo, configPath, ref)
 		var config *RepositoryConfig
 		switch {
 		case err == nil && data == nil:
