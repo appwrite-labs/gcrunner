@@ -54,7 +54,7 @@ Point the BuildKit registry cache at the same repository:
 
 ## How authentication works
 
-The VM's service account has `artifactregistry.writer` on the registry and `artifactregistry.reader` on each regional cache. The startup script writes a Docker `credHelpers` entry for both hosts that uses the gcloud credential helper, which mints a fresh token from the metadata server on every Docker call. A long job never outlives a login.
+The VM's service account has `artifactregistry.writer` on the registry and `artifactregistry.reader` on each regional cache. The startup script writes a Docker `credHelpers` entry for both hosts that uses the gcloud credential helper, which mints a fresh token from the metadata server on every Docker call. A long job never outlives a login. A custom image needs the gcloud CLI for this to work, and `jq` if it ships its own Docker config that should be kept.
 
 The registry is shared by every repository the deployment serves, like the cache bucket. Namespace tags by repository if that matters, or run a separate deployment for repositories that must not see each other's images.
 
