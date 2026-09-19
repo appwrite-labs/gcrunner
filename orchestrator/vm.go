@@ -67,7 +67,8 @@ sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
 // metadata server, so a long job never outlives a login.
 const registryScriptTemplate = `
 install -d -o runner -g runner -m 700 /home/runner/.docker
-echo '%s' > /home/runner/.docker/config.json
+jq -c --argjson add '%s' '. * $add' <(cat /home/runner/.docker/config.json 2>/dev/null || echo '{}') > /home/runner/.docker/config.json.new
+mv /home/runner/.docker/config.json.new /home/runner/.docker/config.json
 printf 'GCRUNNER_REGISTRY=%%s\nGCRUNNER_REGISTRY_PULL=%%s\n' "%s" "%s" >> /home/runner/.env
 chown runner:runner /home/runner/.docker/config.json /home/runner/.env
 `

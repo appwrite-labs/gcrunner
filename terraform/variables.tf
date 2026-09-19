@@ -55,4 +55,9 @@ variable "registry_retention_days" {
   description = "Days an image stays in the registry and its regional caches"
   type        = number
   default     = 10
+
+  validation {
+    condition     = var.registry_retention_days > 0
+    error_message = "registry_retention_days must be greater than zero."
+  }
 }
