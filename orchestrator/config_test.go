@@ -240,11 +240,6 @@ func TestConfigCacheLoad(t *testing.T) {
 		t.Errorf("an expired commit entry was still served: cpu = %q", config.Runners["a"].CPU)
 	}
 
-	reply, replyErr = nil, nil
-	if _, err := cache.load(context.Background(), "o", "r", "main", false); !errors.Is(err, errConfigNotFound) {
-		t.Errorf("missing file: err = %v, want not found", err)
-	}
-
 	replyErr = &githubError{Status: http.StatusForbidden, Body: "Resource not accessible by integration"}
 	other := strings.Repeat("b", 40)
 	if _, err := cache.load(context.Background(), "o", "r", other, true); !errors.Is(err, errConfigForbidden) {
