@@ -85,11 +85,13 @@ type telemetry struct {
 	provider *sdkmetric.MeterProvider
 	// One goroutine exports; requests only ask for a flush and wait a bounded
 	// time for one to complete. dirty coalesces the asks that arrive during an
-	// export into a single further export, and flushed is closed and replaced
-	// each time an export finishes so waiters can tell one has happened.
+	// export into a single further export. pending is closed when the next
+	// export to start has finished; it is replaced as that export starts, so a
+	// request that takes it before asking always waits for an export that
+	// begins after its ask and therefore carries what it recorded.
 	dirty   chan struct{}
 	mu      sync.Mutex
-	flushed chan struct{}
+	pending chan struct{}
 	instruments
 }
 
@@ -140,7 +142,7 @@ func withProvider(provider *sdkmetric.MeterProvider) *telemetry {
 	t := &telemetry{
 		provider:    provider,
 		dirty:       make(chan struct{}, 1),
-		flushed:     make(chan struct{}),
+		pending:     make(chan struct{}),
 		instruments: newInstruments(provider),
 	}
 	go t.exportLoop()
@@ -151,16 +153,17 @@ func withProvider(provider *sdkmetric.MeterProvider) *telemetry {
 // export the same cumulative values with disagreeing timestamps.
 func (t *telemetry) exportLoop() {
 	for range t.dirty {
+		t.mu.Lock()
+		done := t.pending
+		t.pending = make(chan struct{})
+		t.mu.Unlock()
+
 		ctx, cancel := context.WithTimeout(context.Background(), exportTimeout)
 		if err := t.provider.ForceFlush(ctx); err != nil {
 			log.Printf("ERROR: metrics flush failed: %v", err)
 		}
 		cancel()
-
-		t.mu.Lock()
-		close(t.flushed)
-		t.flushed = make(chan struct{})
-		t.mu.Unlock()
+		close(done)
 	}
 }
 
@@ -274,19 +277,18 @@ func recordTask(ctx context.Context, task, retryHeader, outcome string) {
 }
 
 // flushMetrics asks for everything recorded so far to be pushed and waits,
-// at most one export's worth of time, for an export to complete. Called at
-// the end of each request that recorded something, because the instance may
-// be frozen or gone before a periodic export would run. A request never
-// exports itself and never waits on another request: a slow collector costs
-// each request one bounded wait, and whatever the export it saw did not
-// carry, the next one does.
+// at most one export's worth of time, for the export that carries it to
+// complete. Called at the end of each request that recorded something,
+// because the instance may be frozen or gone before a periodic export would
+// run. A request never exports itself and never waits on another request:
+// a slow collector costs each request one bounded wait.
 func flushMetrics(ctx context.Context) {
 	t := getTelemetry()
 	if t.provider == nil {
 		return
 	}
 	t.mu.Lock()
-	flushed := t.flushed
+	flushed := t.pending
 	t.mu.Unlock()
 
 	select {
