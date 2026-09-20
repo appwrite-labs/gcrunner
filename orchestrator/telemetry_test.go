@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,24 +165,38 @@ func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 func TestEveryZoneTriedReportsItsOutcome(t *testing.T) {
 	collect := collectMetrics(t)
 	quota := errors.New("googleapi: Error 403: QUOTA_EXCEEDED")
-	if _, err := provision(t, map[string]error{"europe-west3-a": quota}); err != nil {
-		t.Fatalf("expected the second zone to succeed: %v", err)
+	tried, err := provision(t, map[string]error{"europe-west3-a": quota})
+	if err != nil {
+		t.Fatalf("expected a later zone to succeed: %v", err)
+	}
+	if len(tried) < 2 {
+		t.Fatalf("tried %v, want the quota zone and at least one more", tried)
 	}
 
 	collected := collect()
-	attempt := func(zone, outcome string) int64 {
+	attempts := func(zone, outcome string) int64 {
 		return counter(t, collected, "gcrunner.vm.creates",
 			attribute.String("zone", zone), attribute.String("machine_type", "c3-standard-4"),
 			attribute.Bool("spot", false), attribute.String("outcome", outcome))
 	}
-	if got := attempt("europe-west3-a", "quota"); got != 1 {
-		t.Errorf("europe-west3-a quota attempts = %d, want 1", got)
+	// Every zone the walk visited reports once: the ones that refused as
+	// quota, the one that accepted as created.
+	last := len(tried) - 1
+	for _, zone := range tried[:last] {
+		if got := attempts(zone, "quota"); got != 1 {
+			t.Errorf("%s quota attempts = %d, want 1", zone, got)
+		}
 	}
-	if got := attempt("europe-west1-b", "created"); got != 1 {
-		t.Errorf("europe-west1-b created attempts = %d, want 1", got)
+	if got := attempts(tried[last], "created"); got != 1 {
+		t.Errorf("%s created attempts = %d, want 1", tried[last], got)
 	}
-	if got := attempt("us-central1-a", "created"); got != 0 {
-		t.Errorf("us-central1-a was never tried but reports %d attempts", got)
+	for _, zone := range configuredZones() {
+		if slices.Contains(tried, zone) {
+			continue
+		}
+		if got := attempts(zone, "created") + attempts(zone, "quota"); got != 0 {
+			t.Errorf("%s was never tried but reports %d attempts", zone, got)
+		}
 	}
 }
 
