@@ -83,9 +83,13 @@ type instruments struct {
 
 type telemetry struct {
 	provider *sdkmetric.MeterProvider
-	// A one-slot semaphore rather than a mutex, so a request waiting its turn
-	// to flush can give up when its own context ends.
-	flushing chan struct{}
+	// One goroutine exports; requests only ask for a flush and wait a bounded
+	// time for one to complete. dirty coalesces the asks that arrive during an
+	// export into a single further export, and flushed is closed and replaced
+	// each time an export finishes so waiters can tell one has happened.
+	dirty   chan struct{}
+	mu      sync.Mutex
+	flushed chan struct{}
 	instruments
 }
 
@@ -133,7 +137,31 @@ func newTelemetry(ctx context.Context) *telemetry {
 }
 
 func withProvider(provider *sdkmetric.MeterProvider) *telemetry {
-	return &telemetry{provider: provider, flushing: make(chan struct{}, 1), instruments: newInstruments(provider)}
+	t := &telemetry{
+		provider:    provider,
+		dirty:       make(chan struct{}, 1),
+		flushed:     make(chan struct{}),
+		instruments: newInstruments(provider),
+	}
+	go t.exportLoop()
+	return t
+}
+
+// exportLoop is the only caller of ForceFlush, so concurrent requests never
+// export the same cumulative values with disagreeing timestamps.
+func (t *telemetry) exportLoop() {
+	for range t.dirty {
+		ctx, cancel := context.WithTimeout(context.Background(), exportTimeout)
+		if err := t.provider.ForceFlush(ctx); err != nil {
+			log.Printf("ERROR: metrics flush failed: %v", err)
+		}
+		cancel()
+
+		t.mu.Lock()
+		close(t.flushed)
+		t.flushed = make(chan struct{})
+		t.mu.Unlock()
+	}
 }
 
 // newResource identifies this instance. Every Cloud Run instance must carry
@@ -245,28 +273,33 @@ func recordTask(ctx context.Context, task, retryHeader, outcome string) {
 	t.taskRetries.Record(ctx, retries, metric.WithAttributes(attribute.String(attributeTask, task)))
 }
 
-// flushMetrics pushes everything recorded so far. Called at the end of each
-// request that recorded something, because the instance may be frozen or
-// gone before a periodic export would run. Flushes are serialised so two
-// requests do not export the same cumulative values with disagreeing
-// timestamps, and a request only waits for its turn while its own context
-// lasts: what it recorded is still in the SDK, and the next flush carries it.
+// flushMetrics asks for everything recorded so far to be pushed and waits,
+// at most one export's worth of time, for an export to complete. Called at
+// the end of each request that recorded something, because the instance may
+// be frozen or gone before a periodic export would run. A request never
+// exports itself and never waits on another request: a slow collector costs
+// each request one bounded wait, and whatever the export it saw did not
+// carry, the next one does.
 func flushMetrics(ctx context.Context) {
 	t := getTelemetry()
 	if t.provider == nil {
 		return
 	}
+	t.mu.Lock()
+	flushed := t.flushed
+	t.mu.Unlock()
+
 	select {
-	case t.flushing <- struct{}{}:
-	case <-ctx.Done():
-		log.Printf("Skipping metrics flush, request over: %v", ctx.Err())
-		return
+	case t.dirty <- struct{}{}:
+	default:
+		// An export is already queued and will carry this request's data.
 	}
-	defer func() { <-t.flushing }()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exportTimeout)
-	defer cancel()
-	if err := t.provider.ForceFlush(ctx); err != nil {
-		log.Printf("ERROR: metrics flush failed: %v", err)
+
+	select {
+	case <-flushed:
+	case <-ctx.Done():
+	case <-time.After(exportTimeout):
+		log.Printf("Not waiting further for the metrics export")
 	}
 }
 
