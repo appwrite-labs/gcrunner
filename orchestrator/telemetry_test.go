@@ -1,0 +1,182 @@
+package function
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+)
+
+// collectMetrics installs an in-memory metrics pipeline for the test and
+// returns a function that reads back everything recorded so far.
+func collectMetrics(t *testing.T) func() metricdata.ResourceMetrics {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	telemetryMu.Lock()
+	original := telemetryInst
+	telemetryInst = &telemetry{provider: provider, instruments: newInstruments(provider)}
+	telemetryMu.Unlock()
+	t.Cleanup(func() {
+		telemetryMu.Lock()
+		telemetryInst = original
+		telemetryMu.Unlock()
+	})
+	return func() metricdata.ResourceMetrics {
+		var collected metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &collected); err != nil {
+			t.Fatal(err)
+		}
+		return collected
+	}
+}
+
+// counter returns the value of the named counter's series with exactly these
+// attributes, or 0 when nothing was recorded for it.
+func counter(t *testing.T, collected metricdata.ResourceMetrics, name string, attributes ...attribute.KeyValue) int64 {
+	t.Helper()
+	want := attribute.NewSet(attributes...)
+	for _, scope := range collected.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want a counter", name, m.Data)
+			}
+			for _, point := range sum.DataPoints {
+				if point.Attributes.Equals(&want) {
+					return point.Value
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// histogram returns the count and sum of the named histogram's series with
+// exactly these attributes.
+func histogram(t *testing.T, collected metricdata.ResourceMetrics, name string, attributes ...attribute.KeyValue) (uint64, float64) {
+	t.Helper()
+	want := attribute.NewSet(attributes...)
+	for _, scope := range collected.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			switch data := m.Data.(type) {
+			case metricdata.Histogram[float64]:
+				for _, point := range data.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Count, point.Sum
+					}
+				}
+			case metricdata.Histogram[int64]:
+				for _, point := range data.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Count, float64(point.Sum)
+					}
+				}
+			default:
+				t.Fatalf("%s is %T, want a histogram", name, m.Data)
+			}
+		}
+	}
+	return 0, 0
+}
+
+func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
+	collect := collectMetrics(t)
+	created := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	job := WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels, WorkflowName: "CI",
+		CreatedAt: created, StartedAt: created.Add(90 * time.Second), CompletedAt: created.Add(690 * time.Second)}
+	repository := Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
+
+	recordJob(context.Background(), WorkflowJobEvent{Action: "queued", WorkflowJob: job, Repository: repository})
+	recordJob(context.Background(), WorkflowJobEvent{Action: "in_progress", WorkflowJob: job, Repository: repository})
+	job.Conclusion = "failure"
+	recordJob(context.Background(), WorkflowJobEvent{Action: "completed", WorkflowJob: job, Repository: repository})
+
+	collected := collect()
+	identity := []attribute.KeyValue{attribute.String("repository", "appwrite-labs/cloud"), attribute.String("workflow", "CI")}
+	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "completed"), attribute.String("conclusion", "failure"))...); got != 1 {
+		t.Errorf("completed failure jobs = %d, want 1", got)
+	}
+	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "queued"), attribute.String("conclusion", ""))...); got != 1 {
+		t.Errorf("queued jobs = %d, want 1", got)
+	}
+	if count, sum := histogram(t, collected, "gcrunner.queue.duration", identity...); count != 1 || sum != 90 {
+		t.Errorf("queue duration count=%d sum=%v, want one observation of 90s", count, sum)
+	}
+	if count, sum := histogram(t, collected, "gcrunner.job.duration", identity...); count != 1 || sum != 600 {
+		t.Errorf("job duration count=%d sum=%v, want one observation of 600s", count, sum)
+	}
+}
+
+func TestEveryZoneTriedReportsItsOutcome(t *testing.T) {
+	collect := collectMetrics(t)
+	quota := errors.New("googleapi: Error 403: QUOTA_EXCEEDED")
+	if _, err := provision(t, map[string]error{"europe-west3-a": quota}); err != nil {
+		t.Fatalf("expected the second zone to succeed: %v", err)
+	}
+
+	collected := collect()
+	attempt := func(zone, outcome string) int64 {
+		return counter(t, collected, "gcrunner.vm.creates",
+			attribute.String("zone", zone), attribute.String("machine_type", "c3-standard-4"),
+			attribute.Bool("spot", false), attribute.String("outcome", outcome))
+	}
+	if got := attempt("europe-west3-a", "quota"); got != 1 {
+		t.Errorf("europe-west3-a quota attempts = %d, want 1", got)
+	}
+	if got := attempt("europe-west1-b", "created"); got != 1 {
+		t.Errorf("europe-west1-b created attempts = %d, want 1", got)
+	}
+	if got := attempt("us-central1-a", "created"); got != 0 {
+		t.Errorf("us-central1-a was never tried but reports %d attempts", got)
+	}
+}
+
+func TestTaskAttemptsRecordTheirRetryDepth(t *testing.T) {
+	collect := collectMetrics(t)
+	originalProvision, originalFetch := provisionVM, fetchRepositoryFile
+	t.Cleanup(func() {
+		provisionVM, fetchRepositoryFile = originalProvision, originalFetch
+		configCache.configs = map[string]configCacheEntry{}
+	})
+	configCache.configs = map[string]configCacheEntry{}
+	fetchRepositoryFile = func(_ context.Context, _, _, _, _ string) ([]byte, error) { return nil, errConfigNotFound }
+	provisionVM = func(_ context.Context, _ WorkflowJobEvent, _ *RunnerLabels) error {
+		return errors.New("every zone out of quota")
+	}
+
+	body, err := json.Marshal(WorkflowJobEvent{
+		Action:      "queued",
+		WorkflowJob: WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels},
+		Repository:  Repository{FullName: "acme/app", Name: "app", Owner: RepositoryOwner{Login: "acme"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/task/queued", strings.NewReader(string(body)))
+	request.Header.Set("X-CloudTasks-TaskName", "task-42")
+	request.Header.Set("X-CloudTasks-TaskRetryCount", "18")
+	HandleTask(httptest.NewRecorder(), request)
+
+	collected := collect()
+	if got := counter(t, collected, "gcrunner.tasks", attribute.String("task", "queued"), attribute.String("outcome", "error")); got != 1 {
+		t.Errorf("failed queued attempts = %d, want 1", got)
+	}
+	if count, sum := histogram(t, collected, "gcrunner.task.retries", attribute.String("task", "queued")); count != 1 || sum != 18 {
+		t.Errorf("retry depth count=%d sum=%v, want one observation of 18", count, sum)
+	}
+}

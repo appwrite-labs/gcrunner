@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -385,18 +386,21 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Counted here rather than in the task, which Cloud Tasks may run many
+	// times for one job.
+	if parseJobLabels(payload.WorkflowJob.Labels) != nil {
+		recordJob(ctx, payload)
+		defer flushMetrics(ctx)
+	}
+
 	var taskPath string
 	switch payload.Action {
 	case "queued":
 		taskPath = "/task/queued"
 	case "completed":
 		taskPath = "/task/completed"
-	case "in_progress":
-		// no-op for MVP
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "ok")
-		return
 	default:
+		// in_progress only feeds the metrics above.
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "ok")
 		return
@@ -445,27 +449,30 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 	retryCount := r.Header.Get("X-CloudTasks-TaskRetryCount")
 	log.Printf("Task %s: action=%s job=%d retry=%s", r.URL.Path, payload.Action, payload.WorkflowJob.ID, retryCount)
 
+	task := path.Base(r.URL.Path)
 	switch r.URL.Path {
 	case "/task/queued":
-		if err := handleQueued(ctx, payload); err != nil {
-			// Acknowledged, not retried: the next attempt fails the same way and
-			// only holds a queue slot. The job stays queued on GitHub either way.
-			if errors.Is(err, errPermanent) {
-				log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
-				break
-			}
-			log.Printf("ERROR handling queued task: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+		err = handleQueued(ctx, payload)
 	case "/task/completed":
-		if err := handleCompleted(ctx, payload); err != nil {
-			log.Printf("ERROR handling completed task: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+		err = handleCompleted(ctx, payload)
 	default:
 		http.Error(w, "unknown task path", http.StatusNotFound)
+		return
+	}
+
+	defer flushMetrics(ctx)
+	switch {
+	case err == nil:
+		recordTask(ctx, task, retryCount, taskOutcomeOK)
+	case errors.Is(err, errPermanent):
+		// Acknowledged, not retried: the next attempt fails the same way and
+		// only holds a queue slot. The job stays queued on GitHub either way.
+		log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
+		recordTask(ctx, task, retryCount, taskOutcomePermanent)
+	default:
+		log.Printf("ERROR handling %s task: %v", task, err)
+		recordTask(ctx, task, retryCount, taskOutcomeError)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -567,11 +574,16 @@ type WorkflowJobEvent struct {
 }
 
 type WorkflowJob struct {
-	ID         int64    `json:"id"`
-	RunID      int64    `json:"run_id"`
-	HeadSHA    string   `json:"head_sha"`
-	Labels     []string `json:"labels"`
-	RunnerName string   `json:"runner_name"`
+	ID           int64     `json:"id"`
+	RunID        int64     `json:"run_id"`
+	HeadSHA      string    `json:"head_sha"`
+	Labels       []string  `json:"labels"`
+	RunnerName   string    `json:"runner_name"`
+	WorkflowName string    `json:"workflow_name"`
+	Conclusion   string    `json:"conclusion"`
+	CreatedAt    time.Time `json:"created_at"`
+	StartedAt    time.Time `json:"started_at"`
+	CompletedAt  time.Time `json:"completed_at"`
 }
 
 type Repository struct {

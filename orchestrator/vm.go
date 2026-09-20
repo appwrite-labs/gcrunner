@@ -188,6 +188,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			resolved, resolveErr := ResolveMachineType(ctx, project, zone, labels)
 			if resolveErr != nil {
 				log.Printf("Failed to resolve machine type in %s: %v, trying next zone", zone, resolveErr)
+				recordVMCreate(ctx, zone, labels.Machine, labels.Spot, outcomeUnresolved)
 				lastErr = resolveErr
 				continue
 			}
@@ -197,11 +198,13 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo, registryScript(zone))
 		err := insertInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
 		if err == nil {
+			recordVMCreate(ctx, zone, machineType, labels.Spot, outcomeCreated)
 			log.Printf("Created VM %s in %s (type=%s) for %s", instanceName, zone, machineType, repoFullName)
 			return nil
 		}
 
 		kind := classifyInsertError(err)
+		recordVMCreate(ctx, zone, machineType, labels.Spot, kind.outcome())
 		switch kind {
 		case insertErrorAlreadyExists:
 			log.Printf("VM %s already exists in %s (duplicate webhook), skipping", instanceName, zone)
@@ -455,6 +458,22 @@ const (
 	insertErrorAlreadyExists
 	insertErrorPermanent
 )
+
+// outcome names the failure for the metrics.
+func (kind insertErrorKind) outcome() string {
+	switch kind {
+	case insertErrorQuota:
+		return outcomeQuota
+	case insertErrorFatal:
+		return outcomeFatal
+	case insertErrorAlreadyExists:
+		return outcomeAlreadyExists
+	case insertErrorPermanent:
+		return outcomePermanent
+	default:
+		return outcomeRetryable
+	}
+}
 
 // classifyInsertError categorizes a VM creation error to decide whether to retry.
 func classifyInsertError(err error) insertErrorKind {

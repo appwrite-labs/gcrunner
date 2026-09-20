@@ -61,3 +61,15 @@ variable "registry_retention_days" {
     error_message = "registry_retention_days must be greater than zero."
   }
 }
+
+variable "telemetry_endpoint" {
+  description = "OTLP/HTTP base URL to push the orchestrator's metrics to (for Prometheus, its /api/v1/otlp path); empty disables metrics"
+  type        = string
+  default     = ""
+}
+
+variable "telemetry_environment" {
+  description = "deployment.environment.name every metric carries"
+  type        = string
+  default     = "production"
+}
