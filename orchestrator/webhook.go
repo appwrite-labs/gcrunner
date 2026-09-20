@@ -24,20 +24,23 @@ import (
 
 var (
 	smClient     *secretmanager.Client
+	smClientErr  error
 	smClientOnce sync.Once
 	projectID    string
 )
 
+// getSecretManagerClient creates the client once. The error is kept with it:
+// a first attempt that fails used to leave a nil client behind, which every
+// later call then dereferenced.
 func getSecretManagerClient(ctx context.Context) (*secretmanager.Client, error) {
-	var initErr error
 	smClientOnce.Do(func() {
-		smClient, initErr = secretmanager.NewClient(ctx)
+		smClient, smClientErr = secretmanager.NewClient(ctx)
 		projectID = os.Getenv("GCP_PROJECT")
 		if projectID == "" {
 			projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
 		}
 	})
-	return smClient, initErr
+	return smClient, smClientErr
 }
 
 func getSecret(ctx context.Context, name string) (string, error) {
