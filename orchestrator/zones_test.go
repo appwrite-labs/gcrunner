@@ -272,6 +272,8 @@ func TestClassifyInsertError(t *testing.T) {
 		{"already exists", fmt.Errorf("The resource 'projects/foo/zones/us-central1-a/instances/gcrunner-123' already exists"), insertErrorAlreadyExists},
 		{"already exists camel", fmt.Errorf("alreadyExists"), insertErrorAlreadyExists},
 		{"zone exhausted", fmt.Errorf("ZONE_RESOURCE_POOL_EXHAUSTED"), insertErrorRetryable},
+		{"deleted image", fmt.Errorf(deletedImageError), insertErrorPermanent},
+		{"machine type missing in zone", fmt.Errorf(missingMachineTypeError), insertErrorRetryable},
 		{"generic error", fmt.Errorf("some transient error"), insertErrorRetryable},
 	}
 	for _, tt := range tests {

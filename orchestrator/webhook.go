@@ -448,6 +448,12 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/task/queued":
 		if err := handleQueued(ctx, payload); err != nil {
+			// Acknowledged, not retried: the next attempt fails the same way and
+			// only holds a queue slot. The job stays queued on GitHub either way.
+			if errors.Is(err, errPermanent) {
+				log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
+				break
+			}
 			log.Printf("ERROR handling queued task: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -485,8 +491,11 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 	}
 
 	log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
-	return createRunnerVM(ctx, event, labels)
+	return provisionVM(ctx, event, labels)
 }
+
+// Indirected so tests can drive HandleTask without Compute or GitHub.
+var provisionVM = createRunnerVM
 
 // resolveJob turns the job's labels into a runner using the repository's config.
 func resolveJob(ctx context.Context, event WorkflowJobEvent, job *JobLabels) (*RunnerLabels, error) {
