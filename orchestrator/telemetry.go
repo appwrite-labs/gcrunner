@@ -156,6 +156,10 @@ func newResource(ctx context.Context) *resource.Resource {
 	return r
 }
 
+// durationBuckets are RunsOn's, so one dashboard can quantile both providers'
+// histograms together; histogram_quantile over mismatched boundaries is wrong.
+var durationBuckets = []float64{0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000}
+
 func newInstruments(provider metric.MeterProvider) instruments {
 	meter := provider.Meter(serviceName)
 	jobs, _ := meter.Int64Counter("gcrunner.jobs",
@@ -164,11 +168,11 @@ func newInstruments(provider metric.MeterProvider) instruments {
 	queueDuration, _ := meter.Float64Histogram("gcrunner.queue.duration",
 		metric.WithUnit("s"),
 		metric.WithDescription("Time from a job being queued on GitHub to it starting on a runner"),
-		metric.WithExplicitBucketBoundaries(15, 30, 60, 90, 120, 180, 300, 600, 1200, 1800, 3600))
+		metric.WithExplicitBucketBoundaries(durationBuckets...))
 	jobDuration, _ := meter.Float64Histogram("gcrunner.job.duration",
 		metric.WithUnit("s"),
 		metric.WithDescription("Time from a job starting on a runner to it completing"),
-		metric.WithExplicitBucketBoundaries(30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200))
+		metric.WithExplicitBucketBoundaries(durationBuckets...))
 	vmCreates, _ := meter.Int64Counter("gcrunner.vm.creates",
 		metric.WithUnit("{attempt}"),
 		metric.WithDescription("VM creation attempts, one per zone tried, by outcome"))
