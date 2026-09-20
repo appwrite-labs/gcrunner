@@ -1,16 +1,18 @@
 package function
 
 import (
-	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// A Secret Manager client that could not be created used to be remembered as
-// created: the first call returned the error, and every call after it
-// dereferenced the nil client.
-func TestSecretClientFailureIsReportedOnEveryCall(t *testing.T) {
+// Every webhook starts by reading the signing secret. When the Secret Manager
+// client could not be created, the first webhook used to get a 500 and every
+// one after it a panic, because the failed client was remembered as created.
+func TestWebhooksKeepFailingCleanlyWithoutSecretManager(t *testing.T) {
 	credentials := filepath.Join(t.TempDir(), "credentials.json")
 	if err := os.WriteFile(credentials, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
@@ -18,8 +20,12 @@ func TestSecretClientFailureIsReportedOnEveryCall(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		if _, err := getSecret(context.Background(), "gcrunner-webhook-secret"); err == nil {
-			t.Fatalf("attempt %d: got a secret without credentials", attempt)
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+		request.Header.Set("X-GitHub-Event", "workflow_job")
+		response := httptest.NewRecorder()
+		HandleWebhook(response, request)
+		if response.Code != http.StatusInternalServerError {
+			t.Errorf("webhook %d: status %d, want 500", attempt, response.Code)
 		}
 	}
 }
