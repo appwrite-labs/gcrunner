@@ -3,6 +3,7 @@ package function
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -211,6 +212,8 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			log.Printf("Out of quota in %s, trying next zone", zone)
 		case insertErrorFatal:
 			return fmt.Errorf("failed to create VM in %s: %w", zone, err)
+		case insertErrorPermanent:
+			return fmt.Errorf("failed to create VM in %s: %w: %w", zone, errPermanent, err)
 		default:
 			lastErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
 			log.Printf("Failed to create VM in %s: %v, trying next zone", zone, err)
@@ -438,6 +441,11 @@ func parseDiskSize(disk string) int64 {
 	return size
 }
 
+// errPermanent marks a failure every retry repeats, in every zone. Retrying
+// it holds a Cloud Tasks slot ahead of jobs that would succeed, and a few
+// such jobs can stall the whole installation.
+var errPermanent = errors.New("permanent failure, not retryable")
+
 type insertErrorKind int
 
 const (
@@ -445,6 +453,7 @@ const (
 	insertErrorQuota
 	insertErrorFatal
 	insertErrorAlreadyExists
+	insertErrorPermanent
 )
 
 // classifyInsertError categorizes a VM creation error to decide whether to retry.
@@ -461,6 +470,12 @@ func classifyInsertError(err error) insertErrorKind {
 	}
 	if strings.Contains(msg, "RESOURCE_NOT_FOUND") || strings.Contains(msg, "forbidden") || strings.Contains(msg, "Permission") {
 		return insertErrorFatal
+	}
+	// A deleted image is a 400 naming the field, not RESOURCE_NOT_FOUND. Images
+	// are global, so every zone answers the same. A machine type missing from
+	// one zone has the same shape and stays retryable so the walk moves on.
+	if strings.Contains(msg, "Invalid value for field") && strings.Contains(msg, "sourceImage") {
+		return insertErrorPermanent
 	}
 	return insertErrorRetryable
 }
