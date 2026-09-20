@@ -90,7 +90,7 @@ resource "google_cloud_run_v2_service" "webhook" {
           value_source {
             secret_key_ref {
               secret  = google_secret_manager_secret.telemetry_headers[0].secret_id
-              version = "latest"
+              version = google_secret_manager_secret_version.telemetry_headers[0].version
             }
           }
         }

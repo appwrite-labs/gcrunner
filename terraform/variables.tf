@@ -68,6 +68,13 @@ variable "telemetry_endpoint" {
   default     = ""
 }
 
+variable "telemetry_headers" {
+  description = "Headers sent with every metrics push, as Name=value pairs separated by commas; for telemetry.appwrite.systems the Cloudflare Access service token pair"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "telemetry_environment" {
   description = "deployment.environment.name every metric carries"
   type        = string

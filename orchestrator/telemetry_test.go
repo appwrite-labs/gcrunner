@@ -1,7 +1,11 @@
 package function
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,7 +27,7 @@ func collectMetrics(t *testing.T) func() metricdata.ResourceMetrics {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	telemetryMu.Lock()
 	original := telemetryInst
-	telemetryInst = &telemetry{provider: provider, instruments: newInstruments(provider)}
+	telemetryInst = withProvider(provider)
 	telemetryMu.Unlock()
 	t.Cleanup(func() {
 		telemetryMu.Lock()
@@ -94,6 +98,30 @@ func histogram(t *testing.T, collected metricdata.ResourceMetrics, name string, 
 	return 0, 0
 }
 
+// deliverWebhook posts a signed workflow_job webhook as GitHub does, with
+// Secret Manager and Cloud Tasks stood in for, and reports the status code.
+func deliverWebhook(t *testing.T, event WorkflowJobEvent) int {
+	t.Helper()
+	const secret = "webhook-secret"
+	originalSecret, originalEnqueue := loadSecret, enqueue
+	t.Cleanup(func() { loadSecret, enqueue = originalSecret, originalEnqueue })
+	loadSecret = func(_ context.Context, _ string) (string, error) { return secret, nil }
+	enqueue = func(_ context.Context, _ string, _ []byte, _ int64) error { return nil }
+
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	request.Header.Set("X-GitHub-Event", "workflow_job")
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response := httptest.NewRecorder()
+	HandleWebhook(response, request)
+	return response.Code
+}
+
 func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 	collect := collectMetrics(t)
 	created := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
@@ -101,18 +129,29 @@ func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 		CreatedAt: created, StartedAt: created.Add(90 * time.Second), CompletedAt: created.Add(690 * time.Second)}
 	repository := Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
 
-	recordJob(context.Background(), WorkflowJobEvent{Action: "queued", WorkflowJob: job, Repository: repository})
-	recordJob(context.Background(), WorkflowJobEvent{Action: "in_progress", WorkflowJob: job, Repository: repository})
-	job.Conclusion = "failure"
-	recordJob(context.Background(), WorkflowJobEvent{Action: "completed", WorkflowJob: job, Repository: repository})
+	for _, action := range []string{"queued", "in_progress", "completed"} {
+		if action == "completed" {
+			job.Conclusion = "failure"
+		}
+		if code := deliverWebhook(t, WorkflowJobEvent{Action: action, WorkflowJob: job, Repository: repository}); code != http.StatusOK {
+			t.Fatalf("%s webhook: status %d", action, code)
+		}
+	}
+	other := WorkflowJob{ID: 43, RunID: 7, Labels: []string{"ubuntu-latest"}, WorkflowName: "CI", Conclusion: "success"}
+	if code := deliverWebhook(t, WorkflowJobEvent{Action: "completed", WorkflowJob: other, Repository: repository}); code != http.StatusOK {
+		t.Fatalf("other provider's webhook: status %d", code)
+	}
 
 	collected := collect()
-	identity := []attribute.KeyValue{attribute.String("repository", "appwrite-labs/cloud"), attribute.String("workflow", "CI")}
+	identity := []attribute.KeyValue{attribute.String("repo_full_name", "appwrite-labs/cloud"), attribute.String("workflow_name", "CI")}
 	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "completed"), attribute.String("conclusion", "failure"))...); got != 1 {
 		t.Errorf("completed failure jobs = %d, want 1", got)
 	}
 	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "queued"), attribute.String("conclusion", ""))...); got != 1 {
 		t.Errorf("queued jobs = %d, want 1", got)
+	}
+	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "completed"), attribute.String("conclusion", "success"))...); got != 0 {
+		t.Errorf("a job on another provider was counted: %d", got)
 	}
 	if count, sum := histogram(t, collected, "gcrunner.queue.duration", identity...); count != 1 || sum != 90 {
 		t.Errorf("queue duration count=%d sum=%v, want one observation of 90s", count, sum)

@@ -36,13 +36,15 @@ const (
 	// stamps each series with the time of its own first observation instead.
 	perSeriesStartTimestampsEnv = "OTEL_GO_X_PER_SERIES_START_TIMESTAMPS"
 
-	flushTimeout = 10 * time.Second
+	// One export attempt, no retries: a request waits for the flush, so an
+	// unreachable collector must cost it one bounded round trip and nothing more.
+	exportTimeout = 3 * time.Second
 )
 
 // Attribute keys shared by the instruments below.
 const (
-	attributeRepository  = "repository"
-	attributeWorkflow    = "workflow"
+	attributeRepository  = "repo_full_name"
+	attributeWorkflow    = "workflow_name"
 	attributeStatus      = "status"
 	attributeConclusion  = "conclusion"
 	attributeZone        = "zone"
@@ -81,7 +83,9 @@ type instruments struct {
 
 type telemetry struct {
 	provider *sdkmetric.MeterProvider
-	flushMu  sync.Mutex
+	// A one-slot semaphore rather than a mutex, so a request waiting its turn
+	// to flush can give up when its own context ends.
+	flushing chan struct{}
 	instruments
 }
 
@@ -110,7 +114,9 @@ func newTelemetry(ctx context.Context) *telemetry {
 		os.Setenv(perSeriesStartTimestampsEnv, "true")
 	}
 
-	exporter, err := otlpmetrichttp.New(ctx)
+	exporter, err := otlpmetrichttp.New(ctx,
+		otlpmetrichttp.WithTimeout(exportTimeout),
+		otlpmetrichttp.WithRetry(otlpmetrichttp.RetryConfig{Enabled: false}))
 	if err != nil {
 		log.Printf("ERROR: metrics exporter unavailable, metrics disabled: %v", err)
 		return &telemetry{instruments: newInstruments(noop.NewMeterProvider())}
@@ -123,7 +129,11 @@ func newTelemetry(ctx context.Context) *telemetry {
 		sdkmetric.WithReader(reader),
 		sdkmetric.WithResource(newResource(ctx)),
 	)
-	return &telemetry{provider: provider, instruments: newInstruments(provider)}
+	return withProvider(provider)
+}
+
+func withProvider(provider *sdkmetric.MeterProvider) *telemetry {
+	return &telemetry{provider: provider, flushing: make(chan struct{}, 1), instruments: newInstruments(provider)}
 }
 
 // newResource identifies this instance. Every Cloud Run instance must carry
@@ -235,15 +245,21 @@ func recordTask(ctx context.Context, task, retryHeader, outcome string) {
 // request that recorded something, because the instance may be frozen or
 // gone before a periodic export would run. Flushes are serialised so two
 // requests do not export the same cumulative values with disagreeing
-// timestamps.
+// timestamps, and a request only waits for its turn while its own context
+// lasts: what it recorded is still in the SDK, and the next flush carries it.
 func flushMetrics(ctx context.Context) {
 	t := getTelemetry()
 	if t.provider == nil {
 		return
 	}
-	t.flushMu.Lock()
-	defer t.flushMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flushTimeout)
+	select {
+	case t.flushing <- struct{}{}:
+	case <-ctx.Done():
+		log.Printf("Skipping metrics flush, request over: %v", ctx.Err())
+		return
+	}
+	defer func() { <-t.flushing }()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exportTimeout)
 	defer cancel()
 	if err := t.provider.ForceFlush(ctx); err != nil {
 		log.Printf("ERROR: metrics flush failed: %v", err)

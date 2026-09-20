@@ -14,7 +14,12 @@ import (
 )
 
 // Cloud Run gives an instance ten seconds after SIGTERM before it is gone.
-const shutdownTimeout = 8 * time.Second
+// Requests in flight get most of it; the final metrics push gets its own
+// share so a slow VM operation cannot use it up.
+const (
+	drainTimeout = 6 * time.Second
+	flushTimeout = 3 * time.Second
+)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -37,10 +42,13 @@ func main() {
 	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
+	drain, cancelDrain := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancelDrain()
+	if err := server.Shutdown(drain); err != nil {
 		log.Printf("ERROR: shutdown: %v", err)
 	}
-	orchestrator.ShutdownTelemetry(ctx)
+
+	flush, cancelFlush := context.WithTimeout(context.Background(), flushTimeout)
+	defer cancelFlush()
+	orchestrator.ShutdownTelemetry(flush)
 }

@@ -354,7 +354,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received %s request from %s, event: %s", r.Method, r.RemoteAddr, r.Header.Get("X-GitHub-Event"))
 
 	// Verify HMAC signature using secret from Secret Manager
-	secret, err := getSecret(ctx, "gcrunner-webhook-secret")
+	secret, err := loadSecret(ctx, "gcrunner-webhook-secret")
 	if err != nil {
 		log.Printf("ERROR: could not load webhook secret: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -406,7 +406,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := enqueueTask(ctx, taskPath, body, payload.WorkflowJob.ID); err != nil {
+	if err := enqueue(ctx, taskPath, body, payload.WorkflowJob.ID); err != nil {
 		log.Printf("ERROR enqueuing task for job %d: %v", payload.WorkflowJob.ID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -416,6 +416,13 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "ok")
 }
+
+// Indirected so tests can drive handleWebhook without Secret Manager or
+// Cloud Tasks.
+var (
+	loadSecret = getSecret
+	enqueue    = enqueueTask
+)
 
 // HandleTask handles requests from Cloud Tasks at /task/* paths.
 // Cloud Run IAM ensures only the tasks SA can invoke this endpoint.
