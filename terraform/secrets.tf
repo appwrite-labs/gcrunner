@@ -47,3 +47,23 @@ resource "google_secret_manager_secret_version" "setup_token" {
   secret      = google_secret_manager_secret.setup_token.id
   secret_data = random_password.setup_token.result
 }
+
+# Headers the orchestrator sends with every metrics push, as the OTLP SDK
+# expects them: "Name=value,Name=value". Versioned from the variable rather
+# than by hand, so the revision that references it never deploys ahead of it.
+resource "google_secret_manager_secret" "telemetry_headers" {
+  count     = var.telemetry_endpoint != "" ? 1 : 0
+  secret_id = "gcrunner-telemetry-headers"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis["secretmanager.googleapis.com"]]
+}
+
+resource "google_secret_manager_secret_version" "telemetry_headers" {
+  count       = var.telemetry_endpoint != "" ? 1 : 0
+  secret      = google_secret_manager_secret.telemetry_headers[0].id
+  secret_data = var.telemetry_headers
+}

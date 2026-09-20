@@ -74,6 +74,34 @@ resource "google_cloud_run_v2_service" "webhook" {
         name  = "CLOUD_TASKS_SA_EMAIL"
         value = google_service_account.tasks.email
       }
+
+      # Metrics go out over OTLP; see orchestrator/telemetry.go.
+      dynamic "env" {
+        for_each = var.telemetry_endpoint != "" ? [1] : []
+        content {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.telemetry_endpoint
+        }
+      }
+      dynamic "env" {
+        for_each = var.telemetry_endpoint != "" ? [1] : []
+        content {
+          name = "OTEL_EXPORTER_OTLP_HEADERS"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.telemetry_headers[0].secret_id
+              version = google_secret_manager_secret_version.telemetry_headers[0].version
+            }
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.telemetry_endpoint != "" ? [1] : []
+        content {
+          name  = "OTEL_RESOURCE_ATTRIBUTES"
+          value = "deployment.environment.name=${var.telemetry_environment}"
+        }
+      }
     }
   }
 
