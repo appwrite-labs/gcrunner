@@ -80,11 +80,20 @@ VMs are ephemeral — one per job, created on demand, destroyed on completion. E
 
 1. Boots from an immutable runner image (Ubuntu 24.04 or 22.04).
 2. Reads the JIT runner config from the instance metadata server, then immediately deletes it.
-3. Optionally starts the local cache server if a GCS bucket is configured.
-4. Registers with GitHub and picks up the job.
-5. Deletes itself when the job finishes.
+3. Matches Docker's bridge MTU to the default-route NIC and restarts Docker before any job runs.
+4. Optionally starts the local cache server if a GCS bucket is configured.
+5. Registers with GitHub and picks up the job.
+6. Deletes itself when the job finishes.
 
 The boot disk is set to auto-delete, so no data persists after the VM is gone.
+
+#### Docker network MTU
+
+GCE networks commonly use a 1460-byte MTU, while Docker defaults to 1500. At boot, gcrunner reads the default-route NIC's MTU and merges it into `/etc/docker/daemon.json`, preserving unrelated settings. It validates the configuration, restarts Docker, and checks the default bridge before starting the runner. Kind copies this bridge MTU when creating its network, so workflows do not need to pre-create a special `kind` network.
+
+On Docker Engine 27+, gcrunner also sets the default MTU for newly created user-defined bridge networks, including Compose networks. Older engines receive only the default-bridge setting. Existing user-defined networks and Docker daemons nested inside containers are not modified; images should not ship a pre-created `kind` network.
+
+This takes effect on new VMs after deploying the orchestrator; no image rebuild is needed. Custom images with Docker require `jq`, `ip`, and a systemd-managed `docker.service`. Images without `dockerd` skip this setup. Invalid configuration or a bridge MTU mismatch stops startup rather than accepting a job with broken networking.
 
 ### Secret Manager
 

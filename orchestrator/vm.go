@@ -2,6 +2,7 @@ package function
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/protobuf/proto"
 )
+
+//go:embed docker-network.sh
+var dockerNetworkScript string
 
 const startupScriptTemplate = `#!/bin/bash
 set -euo pipefail
@@ -35,6 +39,7 @@ REPO_NAME="%s"
 
 cd /home/runner
 
+%s
 # Start cache server if bucket is configured
 if [ -n "${CACHE_BUCKET}" ] && [ -x /usr/local/bin/cache-server ]; then
   /usr/local/bin/cache-server \
@@ -195,7 +200,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			machineType = resolved
 		}
 
-		startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo, registryScript(zone))
+		startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo, dockerNetworkScript, registryScript(zone))
 		err := insertInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
 		if err == nil {
 			recordVMCreate(ctx, zone, machineType, labels.Spot, outcomeCreated)

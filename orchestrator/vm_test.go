@@ -43,6 +43,12 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 		}
 	}
 
+	// Docker configuration is exercised separately with isolated paths/stubs.
+	// Never restart the test host's Docker service.
+	if !strings.Contains(script, dockerNetworkScript) || strings.Index(script, dockerNetworkScript) > strings.Index(script, "sudo -u runner") {
+		t.Fatal("Docker network setup must run before the Actions runner")
+	}
+	script = strings.Replace(script, dockerNetworkScript, "", 1)
 	boot := exec.Command("bash", "-c", strings.ReplaceAll(script, "/home/runner", home))
 	boot.Dir = home
 	boot.Env = append(os.Environ(), "PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"))
