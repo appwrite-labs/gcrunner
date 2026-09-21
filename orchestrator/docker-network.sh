@@ -10,7 +10,7 @@ if ! command -v dockerd >/dev/null 2>&1; then
 fi
 
 interface=$(ip -j route show default | jq -er '.[0].dev')
-mtu=$(cat "/sys/class/net/${interface}/mtu")
+mtu=$(ip -j link show dev "${interface}" | jq -er '.[0].mtu')
 if ! [[ "${mtu}" =~ ^[0-9]+$ ]] || (( mtu < 1280 || mtu > 65535 )); then
   echo "Invalid Docker network MTU: ${mtu}" >&2
   exit 1
@@ -24,9 +24,11 @@ if ! [[ "${major}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-install -d -m 755 /etc/docker
-config=/etc/docker/daemon.json
-tmp=$(mktemp /etc/docker/daemon.json.XXXXXX)
+# Allow an isolated configuration directory when exercising startup in tests.
+config_dir=${GCRUNNER_DOCKER_CONFIG_DIR:-/etc/docker}
+install -d -m 755 "${config_dir}"
+config=${config_dir}/daemon.json
+tmp=$(mktemp "${config_dir}/daemon.json.XXXXXX")
 trap 'rm -f "${tmp}"' EXIT
 existing=/dev/null
 if [ -e "${config}" ]; then
@@ -41,7 +43,9 @@ jq -s --argjson mtu "${mtu}" --argjson major "${major}" '
     else . end
 ' "${existing}" > "${tmp}"
 dockerd --validate --config-file "${tmp}"
-chmod 644 "${tmp}"
+# Existing settings may contain proxy credentials. Never make them readable
+# by the unprivileged runner when replacing the daemon configuration.
+chmod 600 "${tmp}"
 mv "${tmp}" "${config}"
 
 echo "Configuring Docker networks for host ${interface} MTU ${mtu} (Engine ${major})"

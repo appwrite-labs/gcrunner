@@ -31,29 +31,30 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 		t.Fatalf("createRunnerInstance: %v", err)
 	}
 
-	stubs := t.TempDir()
+	host := newDockerTestHost(t)
+	observedMTU := filepath.Join(home, "runner-observed-mtu")
 	for name, body := range map[string]string{
 		"curl":    "echo jit",
-		"sudo":    "exit 0",
+		"sudo":    `cat "$TEST_DOCKER_STATE" > "$TEST_RUNNER_OBSERVED_MTU"`,
 		"chown":   "exit 0",
 		"install": `mkdir -p "${!#}"`,
 	} {
-		if err := os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/bash\n"+body+"\n"), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(host.bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Docker configuration is exercised separately with isolated paths/stubs.
-	// Never restart the test host's Docker service.
-	if !strings.Contains(script, dockerNetworkScript) || strings.Index(script, dockerNetworkScript) > strings.Index(script, "sudo -u runner") {
-		t.Fatal("Docker network setup must run before the Actions runner")
-	}
-	script = strings.Replace(script, dockerNetworkScript, "", 1)
+	// Execute the full production startup, including Docker setup. Only the
+	// external host services are substituted; no production block is removed.
 	boot := exec.Command("bash", "-c", strings.ReplaceAll(script, "/home/runner", home))
 	boot.Dir = home
-	boot.Env = append(os.Environ(), "PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"))
+	boot.Env = append(host.env, "TEST_RUNNER_OBSERVED_MTU="+observedMTU)
 	if out, err := boot.CombinedOutput(); err != nil {
 		t.Fatalf("startup script failed: %v\n%s", err, out)
+	}
+	mtu, err := os.ReadFile(observedMTU)
+	if err != nil || strings.TrimSpace(string(mtu)) != "1460" {
+		t.Fatalf("runner started without the configured bridge: MTU=%q, error=%v", mtu, err)
 	}
 }
 

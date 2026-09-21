@@ -47,15 +47,25 @@ done
 ' sh "http://${ip}:18080/payload" "$expected"
 echo LARGE_RESPONSE_PASSED
 
-# Also traverse the actual GCE NIC, rather than only the in-cluster path.
+# Also traverse the actual GCE NIC. Compare with a host-side reference download,
+# rather than coupling this network regression to a tool's release/checksum pin.
+# An operator can substitute any stable HTTPS payload of at least 1 MiB.
+url=${MTU_E2E_DOWNLOAD_URL:-https://proof.ovh.net/files/10Mb.dat}
+reference=$(mktemp)
+trap 'rm -f "$reference"; "${k[@]}" exec "$executor" -c docker -- docker rm -f gcrunner-mtu-response >/dev/null' EXIT
+curl --fail --location --silent --show-error --max-time 60 --output "$reference" "$url"
+expected=$(sha256sum "$reference" | cut -d' ' -f1)
+bytes=$(wc -c < "$reference" | tr -d '[:space:]')
+test "$bytes" -ge 1048576
 "${k[@]}" exec "$executor" -c docker -- docker run --rm --network appwrite \
   --entrypoint node openruntimes/node:v5-22 -e '
 (async () => {
-  const response = await fetch("https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64", {signal: AbortSignal.timeout(60000)});
+  const [url, expectedHash, expectedLength] = process.argv.slice(1);
+  const response = await fetch(url, {signal: AbortSignal.timeout(60000)});
   if (!response.ok) throw Error(response.status);
   const body = Buffer.from(await response.arrayBuffer());
   const hash = require("crypto").createHash("sha256").update(body).digest("hex");
-  if (hash !== "eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa") throw Error(hash);
-  console.log("Nested external HTTPS download:", body.length, "bytes, SHA256 verified");
+  if (body.length !== Number(expectedLength) || hash !== expectedHash) throw Error("Download mismatch");
+  console.log("Nested external HTTPS download:", body.length, "bytes, SHA256 verified against host reference");
 })().catch(error => { console.error(error); process.exit(1); });
-'
+' "$url" "$expected" "$bytes"

@@ -89,7 +89,7 @@ The boot disk is set to auto-delete, so no data persists after the VM is gone.
 
 #### Docker network MTU
 
-GCE networks commonly use a 1460-byte MTU, while Docker defaults to 1500. At boot, gcrunner reads the default-route NIC's MTU and merges it into `/etc/docker/daemon.json`, preserving unrelated settings. It validates the configuration, restarts Docker, and checks the default bridge before starting the runner. Kind copies this bridge MTU when creating its network, so workflows do not need to pre-create a special `kind` network.
+GCE networks commonly use a 1460-byte MTU, while Docker defaults to 1500. At boot, gcrunner reads the default-route NIC's MTU and merges it into `/etc/docker/daemon.json`, preserving unrelated settings and keeping the replacement file root-only (`0600`). It validates the configuration, restarts Docker, and checks the default bridge before starting the runner. Kind copies this bridge MTU when creating its network, so workflows do not need to pre-create a special `kind` network.
 
 On Docker Engine 27+, gcrunner also sets the default MTU for newly created user-defined bridge networks, including Compose networks. Older engines receive only the default-bridge setting. Existing user-defined networks and Docker daemons nested inside containers are not modified; images should not ship a pre-created `kind` network.
 
