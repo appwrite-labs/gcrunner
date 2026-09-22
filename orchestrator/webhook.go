@@ -479,6 +479,12 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 		// only holds a queue slot. The job stays queued on GitHub either way.
 		log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
 		recordTask(ctx, task, retryCount, taskOutcomePermanent)
+	case errors.Is(err, errRunBusy):
+		// Expected while sibling jobs finish, so retried without the noise.
+		log.Printf("Job %d: %v, retrying later", payload.WorkflowJob.ID, err)
+		recordTask(ctx, task, retryCount, taskOutcomeDeferred)
+		http.Error(w, "run in progress", http.StatusServiceUnavailable)
+		return
 	default:
 		log.Printf("ERROR handling %s task: %v", task, err)
 		recordTask(ctx, task, retryCount, taskOutcomeError)

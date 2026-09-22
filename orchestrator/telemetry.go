@@ -70,6 +70,7 @@ const (
 	taskOutcomeOK        = "ok"
 	taskOutcomeError     = "error"
 	taskOutcomePermanent = "permanent"
+	taskOutcomeDeferred  = "deferred"
 )
 
 type instruments struct {

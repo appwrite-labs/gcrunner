@@ -355,15 +355,27 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	return nil
 }
 
+// errRunBusy means the run still has jobs going, so GitHub would refuse the
+// rerun. The task comes back later and tries again once the run is done.
+var errRunBusy = errors.New("run still in progress")
+
 // rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
 // run. GitHub refuses a rerun while the run is busy, when an earlier call
-// already started it, and when the App lacks actions: write. Only a rerun
-// that took is done, shown by this job being on a later attempt; anything
-// else is an error so the task comes back later.
+// already started it, and when the App lacks actions: write. A busy run is
+// waited out rather than asked. Only a rerun that took is done, shown by this
+// job being on a later attempt; anything else is an error so the task comes
+// back later.
 func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
+	}
+	completed, err := runCompleted(ctx, owner, repo, job.RunID, installationToken)
+	if err != nil {
+		return err
+	}
+	if !completed {
+		return fmt.Errorf("rerun job %d: %w", job.ID, errRunBusy)
 	}
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
 	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
@@ -386,6 +398,30 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	}
 	return refused
 }
+
+// runCompleted reports whether every job of the run has finished. GitHub only
+// reruns a job of a run whose status is completed.
+func runCompleted(ctx context.Context, owner, repo string, runID int64, installationToken string) (bool, error) {
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d", owner, repo, runID)
+	resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return false, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	var run struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		return false, fmt.Errorf("decode run %d: %w", runID, err)
+	}
+	return run.Status == runStatusCompleted, nil
+}
+
+const runStatusCompleted = "completed"
 
 // latestAttempt returns the earliest attempt among the run's latest jobs of
 // this job's name, or zero when there is none. A rerun gives the job a new

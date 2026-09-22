@@ -23,10 +23,12 @@ var (
 	jobEnd   = jobStart.Add(20 * time.Minute)
 )
 
-// github stands in for api.github.com: it answers the rerun request with
-// rerunStatus, lists the run's latest jobs from latest (name to attempts),
-// and counts the reruns it received.
+// github stands in for api.github.com: it reports the run as runStatus
+// (completed when empty), answers the rerun request with rerunStatus, lists
+// the run's latest jobs from latest (name to attempts), and counts the reruns
+// it received.
 type github struct {
+	runStatus   string
 	rerunStatus int
 	latest      map[string][]int
 	reruns      int
@@ -41,6 +43,12 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		return answer(http.StatusOK, `{"id": 5}`)
 	case req.URL.Path == "/app/installations/5/access_tokens":
 		return answer(http.StatusCreated, `{"token": "ghs_test"}`)
+	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7":
+		status := g.runStatus
+		if status == "" {
+			status = "completed"
+		}
+		return answer(http.StatusOK, fmt.Sprintf(`{"id": 7, "status": %q}`, status))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
 		g.reruns++
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
@@ -161,6 +169,29 @@ func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 		gh := &github{rerunStatus: http.StatusForbidden, latest: c.latest}
 		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
 			t.Errorf("%s: status %d, want %d", name, code, c.code)
+		}
+	}
+}
+
+// GitHub refuses to rerun a job while any job of its run is still going, so
+// asking would only fail. A busy run is retried later without asking and
+// without an error, and the rerun goes out once the run has completed.
+func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
+	for name, c := range map[string]struct {
+		runStatus string
+		code      int
+		reruns    int
+	}{
+		"run queued":      {"queued", http.StatusServiceUnavailable, 0},
+		"run in progress": {"in_progress", http.StatusServiceUnavailable, 0},
+		"run completed":   {"completed", http.StatusOK, 1},
+	} {
+		gh := &github{runStatus: c.runStatus, rerunStatus: http.StatusCreated}
+		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
+			t.Errorf("%s: status %d, want %d", name, code, c.code)
+		}
+		if gh.reruns != c.reruns {
+			t.Errorf("%s: %d reruns, want %d", name, gh.reruns, c.reruns)
 		}
 	}
 }
