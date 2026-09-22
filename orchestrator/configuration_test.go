@@ -122,6 +122,20 @@ func TestAMachineSizeNoZoneOffersIsAConfigurationError(t *testing.T) {
 	}
 }
 
+// An exact machine name skips the catalogue and is refused by the insert
+// instead; missing from every zone, that is the workflow's mistake too.
+func TestAnExactMachineNameNoZoneOffersIsAConfigurationError(t *testing.T) {
+	missing := errors.New(missingMachineTypeError)
+	_, err := provision(t, map[string]error{"europe-west3-a": missing, "europe-west1-b": missing, "us-central1-a": missing})
+	if !errors.Is(err, errConfiguration) {
+		t.Errorf("every zone refused the name: %v, want a configuration error", err)
+	}
+	_, err = provision(t, map[string]error{"europe-west3-a": missing, "europe-west1-b": errors.New("every zone out of quota"), "us-central1-a": missing})
+	if errors.Is(err, errConfiguration) {
+		t.Errorf("one zone failed for another reason: %v, want a retryable error", err)
+	}
+}
+
 func withMachineTypes(t *testing.T, fn func(ctx context.Context, project, zone string) ([]*MachineTypeInfo, error)) {
 	t.Helper()
 	original := listMachineTypes

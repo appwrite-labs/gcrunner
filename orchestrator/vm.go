@@ -272,6 +272,10 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 			return fmt.Errorf("failed to create VM in %s: %w", zone, err)
 		case insertErrorPermanent:
 			return fmt.Errorf("failed to create VM in %s: %w: %w", zone, errPermanent, err)
+		case insertErrorNoMachineType:
+			unmatched++
+			lastErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
+			log.Printf("Machine type missing in %s: %v, trying next zone", zone, err)
 		default:
 			lastErr = fmt.Errorf("failed to create VM in %s: %w", zone, err)
 			log.Printf("Failed to create VM in %s: %v, trying next zone", zone, err)
@@ -597,6 +601,7 @@ const (
 	insertErrorFatal
 	insertErrorAlreadyExists
 	insertErrorPermanent
+	insertErrorNoMachineType
 )
 
 // outcome names the failure for the metrics.
@@ -632,9 +637,13 @@ func classifyInsertError(err error) insertErrorKind {
 	}
 	// A deleted image is a 400 naming the field, not RESOURCE_NOT_FOUND. Images
 	// are global, so every zone answers the same. A machine type missing from
-	// one zone has the same shape and stays retryable so the walk moves on.
+	// one zone has the same shape; the walk moves on and only every zone
+	// missing it makes it the workflow's mistake.
 	if strings.Contains(msg, "Invalid value for field") && strings.Contains(msg, "sourceImage") {
 		return insertErrorPermanent
+	}
+	if strings.Contains(msg, "Invalid value for field") && strings.Contains(msg, "machineType") {
+		return insertErrorNoMachineType
 	}
 	return insertErrorRetryable
 }
