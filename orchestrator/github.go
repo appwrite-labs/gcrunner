@@ -389,11 +389,15 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	return refused
 }
 
-// latestAttempt returns the attempt on which the run last ran a job of this
-// job's name, or zero when the latest attempt has no such job. A job left
-// alone by a rerun of its siblings keeps its earlier attempt in that list.
+// latestAttempt returns the earliest attempt among the run's latest jobs of
+// this job's name, or zero when there is none. A rerun gives the job a new
+// id, so its name is the only link across attempts, and a job left alone by
+// a rerun of its siblings keeps its earlier attempt in that list. Two jobs
+// can share a name, so the earliest of them speaks for the rerun: it counts
+// as started only once every job of that name has moved on.
 func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (int, error) {
 	const perPage = 100
+	earliest := 0
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d", owner, repo, job.RunID, perPage, page)
 		resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
@@ -414,12 +418,12 @@ func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, ins
 			return 0, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
 		}
 		for _, candidate := range result.Jobs {
-			if candidate.Name == job.Name {
-				return candidate.RunAttempt, nil
+			if candidate.Name == job.Name && (earliest == 0 || candidate.RunAttempt < earliest) {
+				earliest = candidate.RunAttempt
 			}
 		}
 		if len(result.Jobs) < perPage {
-			return 0, nil
+			return earliest, nil
 		}
 	}
 }

@@ -31,7 +31,7 @@ var (
 type github struct {
 	t           *testing.T
 	rerunStatus int
-	latest      map[string]int
+	latest      map[string][]int
 	mu          sync.Mutex
 	reruns      []string
 }
@@ -58,8 +58,10 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7/jobs" && req.URL.Query().Get("filter") == "latest":
 		var jobs []string
-		for name, attempt := range g.latest {
-			jobs = append(jobs, fmt.Sprintf(`{"name": %q, "run_attempt": %d}`, name, attempt))
+		for name, attempts := range g.latest {
+			for _, attempt := range attempts {
+				jobs = append(jobs, fmt.Sprintf(`{"name": %q, "run_attempt": %d}`, name, attempt))
+			}
 		}
 		return answer(http.StatusOK, fmt.Sprintf(`{"jobs": [%s]}`, strings.Join(jobs, ",")))
 	}
@@ -183,7 +185,7 @@ func TestRerunsStopAtTheThirdAttempt(t *testing.T) {
 // rerun, and the job already running on the next attempt shows the first one
 // took, so the task is acknowledged rather than retried forever.
 func TestARerunGitHubAlreadyStartedIsDone(t *testing.T) {
-	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 2, "lint": 1}}
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string][]int{"build": {2}, "lint": {1}}}
 	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
 	if code != http.StatusOK {
 		t.Errorf("status %d, want 200 so Cloud Tasks drops the task", code)
@@ -194,7 +196,7 @@ func TestARerunGitHubAlreadyStartedIsDone(t *testing.T) {
 // refuses it for good when the App lacks actions: write. Neither started an
 // attempt, so the task must come back rather than leave the job failed.
 func TestARerunGitHubRefusedIsRetried(t *testing.T) {
-	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 1, "lint": 1}}
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string][]int{"build": {1}, "lint": {1}}}
 	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
 	if code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500 so Cloud Tasks retries", code)
@@ -206,7 +208,19 @@ func TestARerunGitHubRefusedIsRetried(t *testing.T) {
 // The run having advanced proves nothing about the second job, which is still
 // on its first attempt, so its task must come back rather than be dropped.
 func TestASiblingsRerunDoesNotCountForThisJob(t *testing.T) {
-	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 1, "lint": 2}}
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string][]int{"build": {1}, "lint": {2}}}
+	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+	if code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500 so the job is rerun once the run settles", code)
+	}
+}
+
+// Two jobs of a run can share a display name, and a rerun gives a job a new
+// id, so the name is all that links the attempts. When a namesake is already
+// on the next attempt while another is not, nothing says which one is ours,
+// so the task comes back rather than being dropped.
+func TestANamesakeOnALaterAttemptIsNotProof(t *testing.T) {
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string][]int{"build": {2, 1}}}
 	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
 	if code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500 so the job is rerun once the run settles", code)
