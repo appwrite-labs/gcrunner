@@ -183,12 +183,12 @@ func getInstallationID(ctx context.Context, appJWT, owner string) (int64, error)
 
 // generateAppJWT creates a JWT signed with the GitHub App's private key.
 func generateAppJWT(ctx context.Context) (string, error) {
-	appIDStr, err := getSecret(ctx, "gcrunner-app-id")
+	appIDStr, err := loadSecret(ctx, "gcrunner-app-id")
 	if err != nil {
 		return "", fmt.Errorf("get app ID: %w", err)
 	}
 
-	keyPEM, err := getSecret(ctx, "gcrunner-private-key")
+	keyPEM, err := loadSecret(ctx, "gcrunner-private-key")
 	if err != nil {
 		return "", fmt.Errorf("get private key: %w", err)
 	}
@@ -254,10 +254,6 @@ func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string)
 	respBody, _ := io.ReadAll(resp.Body)
 	return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
 }
-
-// notAccessible is how GitHub words a 403 for a permission the App
-// installation lacks, as opposed to a 403 for a request that no longer applies.
-const notAccessible = "Resource not accessible by integration"
 
 // githubError is a non-2xx answer from the GitHub API.
 type githubError struct {
@@ -359,23 +355,19 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	return nil
 }
 
-// rerunWorkflowJob re-queues a job and its dependents. GitHub answers 403
-// when the job is already queued or running, which means an earlier call
-// already did the work, so that counts as success. A 403 for a missing
-// permission is kept as an error: the App needs actions: write for this.
-func rerunWorkflowJob(ctx context.Context, owner, repo string, jobID int64) error {
+// rerunWorkflowJob re-queues a job and its dependents as a new attempt of
+// its run. GitHub answers 403 for a rerun it will not start, whether because
+// the run is still busy with other jobs, an earlier call already started the
+// attempt, or the App lacks actions: write. Only the second is done: the run
+// then reports an attempt past the job's. Anything else is an error so the
+// task comes back later.
+func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, jobID)
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+installationToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := githubClient.Do(req)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
+	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
 	if err != nil {
 		return err
 	}
@@ -384,9 +376,45 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, jobID int64) erro
 		return nil
 	}
 	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusForbidden && !strings.Contains(string(respBody), notAccessible) {
-		log.Printf("Job %d: rerun already requested: %s", jobID, string(respBody))
+	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	attempt, err := runAttempt(ctx, owner, repo, job.RunID, installationToken)
+	if err != nil {
+		return errors.Join(refused, err)
+	}
+	if attempt > job.RunAttempt {
+		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
 		return nil
 	}
-	return &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	return refused
+}
+
+// runAttempt returns the attempt the run is currently on.
+func runAttempt(ctx context.Context, owner, repo string, runID int64, installationToken string) (int, error) {
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d", owner, repo, runID)
+	resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return 0, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	var run struct {
+		RunAttempt int `json:"run_attempt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
+		return 0, fmt.Errorf("decode run %d: %w", runID, err)
+	}
+	return run.RunAttempt, nil
+}
+
+func githubRequest(ctx context.Context, method, endpoint, installationToken string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	return githubClient.Do(req)
 }

@@ -16,6 +16,7 @@ import (
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -463,13 +464,16 @@ func findInstanceZone(ctx context.Context, name string) (string, error) {
 
 const preemptedOperation = "compute.instances.preempted"
 
+// computeOptions let tests point the operations client at a server of their own.
+var computeOptions []option.ClientOption
+
 // instancePreempted reports whether Compute Engine preempted this VM between
 // the two times. The VM is gone by the time anyone asks, so its zone is
 // unknown and the operations are searched across the whole project. The
 // window keeps a preemption of an idle VM, after its job had already finished,
 // from passing off a real failure as one.
 func instancePreempted(ctx context.Context, name string, from, until time.Time) (bool, error) {
-	client, err := compute.NewGlobalOperationsRESTClient(ctx)
+	client, err := compute.NewGlobalOperationsRESTClient(ctx, computeOptions...)
 	if err != nil {
 		return false, fmt.Errorf("create compute client: %w", err)
 	}

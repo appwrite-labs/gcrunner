@@ -527,8 +527,6 @@ func resolveJob(ctx context.Context, event WorkflowJobEvent, job *JobLabels) (*R
 var (
 	deleteVM     = deleteRunnerVM
 	runnerIsBusy = runnerBusy
-	vmPreempted  = instancePreempted
-	rerunJob     = rerunWorkflowJob
 )
 
 // rerunAttempts caps automatic reruns after preemption. run_attempt counts
@@ -571,7 +569,7 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 // done, so a Cloud Tasks retry of this task cannot rerun it twice.
 func rerunIfPreempted(ctx context.Context, event WorkflowJobEvent, instanceName string) error {
 	job := event.WorkflowJob
-	preempted, err := vmPreempted(ctx, instanceName, job.StartedAt, job.CompletedAt)
+	preempted, err := instancePreempted(ctx, instanceName, job.StartedAt, job.CompletedAt)
 	if err != nil {
 		return fmt.Errorf("check preemption of %s: %w", instanceName, err)
 	}
@@ -584,7 +582,7 @@ func rerunIfPreempted(ctx context.Context, event WorkflowJobEvent, instanceName 
 		return nil
 	}
 	log.Printf("Job %d: preempted after %s, rerunning (attempt %d)", job.ID, ran, job.RunAttempt+1)
-	if err := rerunJob(ctx, event.Repository.Owner.Login, event.Repository.Name, job.ID); err != nil {
+	if err := rerunWorkflowJob(ctx, event.Repository.Owner.Login, event.Repository.Name, job); err != nil {
 		return fmt.Errorf("rerun job %d: %w", job.ID, err)
 	}
 	return nil
