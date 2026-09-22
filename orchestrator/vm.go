@@ -28,21 +28,30 @@ set -euo pipefail
 METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
 METADATA_HEADER="Metadata-Flavor: Google"
 
-# Delete this VM with its own service account, so a job that ends without
-# the orchestrator hearing about it does not leave the VM running until the
-# lifetime cap. Runs on every exit, a failed startup included, and keeps
-# trying through a metadata or API hiccup: nothing else will delete a VM
-# whose runner never got a job.
+# One attempt to delete this VM with its own service account, confirmed
+# through the operation Compute Engine returns: an accepted request can
+# still fail.
+delete_vm() {
+  local token zone name operation
+  token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
+  zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
+  name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
+  operation=$(curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
+    "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" | jq -r '.selfLink // empty' || true)
+  [ -n "${operation}" ] || return 1
+  curl -sf -X POST -H "Authorization: Bearer ${token}" "${operation}/wait" \
+    | jq -e '.status == "DONE" and (.error | not)' >/dev/null
+}
+
+# Delete this VM on every exit, a failed startup included, so a job that
+# ends without the orchestrator hearing about it does not leave the VM
+# running until the lifetime cap. The runner is gone by then, so nothing
+# else will delete a VM whose runner never got a job: keep trying through
+# a metadata or API hiccup.
 self_destruct() {
-  local attempt token zone name
+  local attempt
   for attempt in $(seq 10); do
-    token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
-    zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
-    name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
-    if curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
-      "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" >/dev/null; then
-      return
-    fi
+    delete_vm && return
     sleep 30
   done
 }
@@ -87,10 +96,14 @@ fi
 
 # A runner whose job was cancelled, or taken by another runner in the run,
 # while this VM booted would otherwise listen until the lifetime cap. The
-# runner starts a worker for its job, which leaves a log behind.
+# runner starts a worker for its job, which leaves a log behind, and a job
+# can still arrive while a failed attempt waits to be retried.
 (
   sleep 600
-  ls _diag/Worker_* >/dev/null 2>&1 || self_destruct
+  while ! ls _diag/Worker_* >/dev/null 2>&1; do
+    delete_vm && break
+    sleep 30
+  done
 ) >/dev/null 2>&1 &
 
 # Run with JIT config (skips config.sh entirely)

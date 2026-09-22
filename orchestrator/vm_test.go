@@ -37,7 +37,6 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	host := newDockerTestHost(t)
 	observedMTU := filepath.Join(home, "runner-observed-mtu")
 	for name, body := range map[string]string{
-		"curl":    "echo jit",
 		"sudo":    `cat "$TEST_DOCKER_STATE" > "$TEST_RUNNER_OBSERVED_MTU"`,
 		"chown":   "exit 0",
 		"install": `mkdir -p "${!#}"`,
@@ -51,7 +50,7 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	// external host services are substituted; no production block is removed.
 	boot := exec.Command("bash", "-c", strings.ReplaceAll(script, "/home/runner", home))
 	boot.Dir = home
-	boot.Env = append(host.env, "TEST_RUNNER_OBSERVED_MTU="+observedMTU)
+	boot.Env = append(computeAPIEnvironment(t, host, home, 0, 0), "TEST_RUNNER_OBSERVED_MTU="+observedMTU)
 	if out, err := boot.CombinedOutput(); err != nil {
 		t.Fatalf("startup script failed: %v\n%s", err, out)
 	}
