@@ -109,11 +109,11 @@ const (
 	// untilRunnerExits is a clock that only moves once the runner is gone.
 	untilRunnerExits = `until grep -q runner-exited "$TEST_CALLS"; do /bin/sleep 0.05; done`
 	// untilJobStarts is a clock that only moves once the runner has a job.
-	untilJobStarts = `until ls _diag/Worker_* >/dev/null 2>&1; do /bin/sleep 0.05; done`
+	untilJobStarts = `until grep -qs "Running job" runner.log; do /bin/sleep 0.05; done`
 	// untilStopped is a runner that listens until it is told to stop.
 	untilStopped = `for _ in $(seq 100); do [ -e "$TEST_RUNNER_STOPPED" ] && break; /bin/sleep 0.05; done`
-	// ranJob is a runner that got its job and finished it.
-	ranJob = `mkdir -p _diag && touch _diag/Worker_1.log`
+	// ranJob is a runner that was assigned its job and finished it.
+	ranJob = `echo "2026-09-22 10:00:00Z: Running job: CI"`
 )
 
 func count(calls []string, event string) int {

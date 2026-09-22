@@ -96,16 +96,21 @@ fi
 
 # A runner whose job was cancelled, or taken by another runner in the run,
 # while this VM booted would otherwise listen until the lifetime cap. The
-# runner starts a worker for its job, which leaves a log behind. Stopping
-# the listener, rather than deleting the VM under it, means no job can be
-# assigned while the deletion the exit below triggers is in flight.
+# listener announces a job the moment it is assigned, before the worker for
+# it exists, and the worker leaves a log of its own. Stopping the listener,
+# rather than deleting the VM under it, means no job can be assigned while
+# the deletion the exit below triggers is in flight.
+job_assigned() {
+  grep -q "Running job" /home/runner/runner.log 2>/dev/null || ls _diag/Worker_* >/dev/null 2>&1
+}
 (
   sleep 600
-  ls _diag/Worker_* >/dev/null 2>&1 || pkill -INT -u runner -f Runner.Listener
+  job_assigned || pkill -INT -u runner -f Runner.Listener
 ) >/dev/null 2>&1 &
 
-# Run with JIT config (skips config.sh entirely)
-sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
+# Run with JIT config (skips config.sh entirely), keeping the output for
+# the watchdog.
+sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}" 2>&1 | tee /home/runner/runner.log
 `
 
 // registryScriptTemplate hands every job step the registry URLs through the
