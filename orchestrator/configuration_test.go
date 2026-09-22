@@ -13,10 +13,8 @@ import (
 	"google.golang.org/api/option"
 )
 
-// engine is what Compute Engine answers while a job is provisioned: the
-// zones discovery reports (nil for a discovery failure), each zone's
-// machine catalogue (a missing zone cannot be read), and each zone's answer
-// to an insert.
+// engine is what Compute Engine answers: zones from discovery (nil when it
+// fails), each zone's catalogue (absent when unreadable), each insert's error.
 type engine struct {
 	zones     []string
 	catalogue map[string][]*MachineTypeInfo
