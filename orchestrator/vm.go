@@ -16,6 +16,7 @@ import (
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -456,6 +457,51 @@ func findInstanceZone(ctx context.Context, name string) (string, error) {
 			if instance.GetName() == name {
 				// The scope key is "zones/<zone>".
 				return path.Base(scope.Key), nil
+			}
+		}
+	}
+}
+
+const preemptedOperation = "compute.instances.preempted"
+
+// computeOptions let tests point the operations client at a server of their own.
+var computeOptions []option.ClientOption
+
+// instancePreempted reports whether Compute Engine preempted this VM between
+// the two times. The VM is gone by then, so its zone is unknown, the whole
+// project is searched, and since the API filter matches a target only by its
+// full zonal URL the instance is picked out by name here. The window keeps a
+// preemption of an idle VM from passing off its job's real failure as one.
+func instancePreempted(ctx context.Context, name string, from, until time.Time) (bool, error) {
+	client, err := compute.NewGlobalOperationsRESTClient(ctx, computeOptions...)
+	if err != nil {
+		return false, fmt.Errorf("create compute client: %w", err)
+	}
+	defer client.Close()
+
+	it := client.AggregatedList(ctx, &computepb.AggregatedListGlobalOperationsRequest{
+		Project:              os.Getenv("GCP_PROJECT"),
+		Filter:               proto.String(fmt.Sprintf("operationType = %q", preemptedOperation)),
+		ReturnPartialSuccess: proto.Bool(true),
+	})
+	for {
+		scope, err := it.Next()
+		if err == iterator.Done {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("list operations for VM %s: %w", name, err)
+		}
+		for _, operation := range scope.Value.GetOperations() {
+			if path.Base(operation.GetTargetLink()) != name {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, operation.GetInsertTime())
+			if err != nil {
+				return false, fmt.Errorf("parse preemption time %q: %w", operation.GetInsertTime(), err)
+			}
+			if !at.Before(from) && !at.After(until) {
+				return true, nil
 			}
 		}
 	}

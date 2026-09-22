@@ -183,12 +183,12 @@ func getInstallationID(ctx context.Context, appJWT, owner string) (int64, error)
 
 // generateAppJWT creates a JWT signed with the GitHub App's private key.
 func generateAppJWT(ctx context.Context) (string, error) {
-	appIDStr, err := getSecret(ctx, "gcrunner-app-id")
+	appIDStr, err := loadSecret(ctx, "gcrunner-app-id")
 	if err != nil {
 		return "", fmt.Errorf("get app ID: %w", err)
 	}
 
-	keyPEM, err := getSecret(ctx, "gcrunner-private-key")
+	keyPEM, err := loadSecret(ctx, "gcrunner-private-key")
 	if err != nil {
 		return "", fmt.Errorf("get private key: %w", err)
 	}
@@ -353,4 +353,83 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	}
 	log.Printf("Removed stale runner registration %s", name)
 	return nil
+}
+
+// rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
+// run. GitHub refuses a rerun while the run is busy, when an earlier call
+// already started it, and when the App lacks actions: write. Only a rerun
+// that took is done, shown by this job being on a later attempt; anything
+// else is an error so the task comes back later.
+func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
+	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	attempt, err := latestAttempt(ctx, owner, repo, job, installationToken)
+	if err != nil {
+		return errors.Join(refused, err)
+	}
+	if attempt > job.RunAttempt {
+		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
+		return nil
+	}
+	return refused
+}
+
+// latestAttempt returns the earliest attempt among the run's latest jobs of
+// this job's name, or zero when there is none. A rerun gives the job a new
+// id, so the name is the only link across attempts, and jobs can share one,
+// so the rerun counts as started only once every job of that name has moved on.
+func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (int, error) {
+	const perPage = 100
+	earliest := 0
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d", owner, repo, job.RunID, perPage, page)
+		resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
+		if err != nil {
+			return 0, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return 0, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+		}
+		var result struct {
+			Jobs []WorkflowJob `json:"jobs"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return 0, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
+		}
+		for _, candidate := range result.Jobs {
+			if candidate.Name == job.Name && (earliest == 0 || candidate.RunAttempt < earliest) {
+				earliest = candidate.RunAttempt
+			}
+		}
+		if len(result.Jobs) < perPage {
+			return earliest, nil
+		}
+	}
+}
+
+func githubRequest(ctx context.Context, method, endpoint, installationToken string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	return githubClient.Do(req)
 }

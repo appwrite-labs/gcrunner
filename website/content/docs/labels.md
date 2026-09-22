@@ -79,7 +79,7 @@ When both are specified, the machine must satisfy both constraints. gcrunner pic
 
 ## Spot VMs
 
-Spot VMs are enabled by default (`spot=true`). They are significantly cheaper than on-demand but can be preempted with 30 seconds of warning. gcrunner automatically falls back to an on-demand VM if Spot capacity is unavailable in the target zone.
+Spot VMs are enabled by default (`spot=true`). They are significantly cheaper than on-demand but can be preempted with 30 seconds of warning. gcrunner automatically falls back to an on-demand VM if Spot capacity is unavailable in the target zone, and re-runs a job whose VM was preempted mid-run, up to three attempts in total. A re-run starts the job from its first step.
 
 For jobs that cannot tolerate preemption (e.g. production deploys), disable Spot:
 
