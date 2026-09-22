@@ -96,14 +96,12 @@ fi
 
 # A runner whose job was cancelled, or taken by another runner in the run,
 # while this VM booted would otherwise listen until the lifetime cap. The
-# runner starts a worker for its job, which leaves a log behind, and a job
-# can still arrive while a failed attempt waits to be retried.
+# runner starts a worker for its job, which leaves a log behind. Stopping
+# the listener, rather than deleting the VM under it, means no job can be
+# assigned while the deletion the exit below triggers is in flight.
 (
   sleep 600
-  while ! ls _diag/Worker_* >/dev/null 2>&1; do
-    delete_vm && break
-    sleep 30
-  done
+  ls _diag/Worker_* >/dev/null 2>&1 || pkill -INT -u runner -f Runner.Listener
 ) >/dev/null 2>&1 &
 
 # Run with JIT config (skips config.sh entirely)
