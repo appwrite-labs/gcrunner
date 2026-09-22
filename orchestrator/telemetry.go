@@ -247,10 +247,18 @@ func recordJob(ctx context.Context, event WorkflowJobEvent) {
 			t.queueDuration.Record(ctx, job.StartedAt.Sub(job.CreatedAt).Seconds(), timing)
 		}
 	case "completed":
-		if !job.StartedAt.IsZero() && !job.CompletedAt.IsZero() {
+		if job.ran() {
 			t.jobDuration.Record(ctx, job.CompletedAt.Sub(job.StartedAt).Seconds(), timing)
 		}
 	}
+}
+
+// ran is false for a job GitHub cancelled while still queued: no runner name,
+// started_at equal to created_at.
+func (job WorkflowJob) ran() bool {
+	return job.RunnerName != "" &&
+		!job.CompletedAt.IsZero() &&
+		job.StartedAt.After(job.CreatedAt)
 }
 
 // recordVMCreate counts one attempt to create a VM in one zone.
