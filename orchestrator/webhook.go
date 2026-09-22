@@ -425,6 +425,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 var (
 	loadSecret = getSecret
 	enqueue    = enqueueTask
+	schedule   = scheduleTask
 )
 
 // HandleTask handles requests from Cloud Tasks at /task/* paths.
@@ -480,11 +481,8 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
 		recordTask(ctx, task, retryCount, taskOutcomePermanent)
 	case errors.Is(err, errRunBusy):
-		// Expected while sibling jobs finish, so retried without the noise.
-		log.Printf("Job %d: %v, retrying later", payload.WorkflowJob.ID, err)
+		// The rerun is waiting on the run; a scheduled task carries it on.
 		recordTask(ctx, task, retryCount, taskOutcomeDeferred)
-		http.Error(w, "run in progress", http.StatusServiceUnavailable)
-		return
 	default:
 		log.Printf("ERROR handling %s task: %v", task, err)
 		recordTask(ctx, task, retryCount, taskOutcomeError)
@@ -544,8 +542,16 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	}
 
 	instanceName, ranHere := deletionTarget(event)
+	deferred := false
 	if ranHere && event.WorkflowJob.Conclusion == conclusionFailure {
-		if err := rerunIfPreempted(ctx, event, instanceName); err != nil {
+		err := rerunIfPreempted(ctx, event, instanceName)
+		switch {
+		case errors.Is(err, errRunBusy):
+			if err := deferRerun(ctx, event); err != nil {
+				return err
+			}
+			deferred = true
+		case err != nil:
 			return err
 		}
 	}
@@ -562,7 +568,35 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 		}
 	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
-	return deleteVM(ctx, instanceName)
+	if err := deleteVM(ctx, instanceName); err != nil {
+		return err
+	}
+	if deferred {
+		return errRunBusy
+	}
+	return nil
+}
+
+// rerunDelay is how long a preempted job waits between looks at whether its
+// run has completed.
+const rerunDelay = 5 * time.Minute
+
+// deferRerun hands the completed task back to Cloud Tasks for later, as its
+// own scheduled task rather than a retry, so the wait costs no retry budget
+// and lasts as long as the run does. The task name carries the due time,
+// since Cloud Tasks refuses to reuse a name for hours after it ran.
+func deferRerun(ctx context.Context, event WorkflowJobEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode job %d: %w", event.WorkflowJob.ID, err)
+	}
+	at := time.Now().Add(rerunDelay)
+	name := fmt.Sprintf("job-%d-rerun-%d", event.WorkflowJob.ID, at.Unix())
+	if err := schedule(ctx, "/task/completed", body, name, at); err != nil {
+		return fmt.Errorf("defer rerun of job %d: %w", event.WorkflowJob.ID, err)
+	}
+	log.Printf("Job %d: run still in progress, checking again in %s", event.WorkflowJob.ID, rerunDelay)
+	return nil
 }
 
 // rerunIfPreempted re-queues a failed job whose spot VM was preempted while

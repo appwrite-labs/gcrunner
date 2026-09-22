@@ -356,26 +356,34 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 }
 
 // errRunBusy means the run still has jobs going, so GitHub would refuse the
-// rerun. The task comes back later and tries again once the run is done.
+// rerun; the check is repeated later, once the run is done.
 var errRunBusy = errors.New("run still in progress")
 
 // rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
-// run. GitHub refuses a rerun while the run is busy, when an earlier call
-// already started it, and when the App lacks actions: write. A busy run is
-// waited out rather than asked. Only a rerun that took is done, shown by this
-// job being on a later attempt; anything else is an error so the task comes
-// back later.
+// run. A rerun that already took, shown by this job being on a later attempt,
+// is done, whether an earlier delivery of the task or a person started it. A
+// busy run is waited out rather than asked, since GitHub refuses the rerun
+// while any job of the run is going. GitHub also refuses when the App lacks
+// actions: write; that and anything else is an error so the task comes back.
 func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
+	}
+	attempt, err := latestAttempt(ctx, owner, repo, job, installationToken)
+	if err != nil {
+		return err
+	}
+	if attempt > job.RunAttempt {
+		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
+		return nil
 	}
 	completed, err := runCompleted(ctx, owner, repo, job.RunID, installationToken)
 	if err != nil {
 		return err
 	}
 	if !completed {
-		return fmt.Errorf("rerun job %d: %w", job.ID, errRunBusy)
+		return errRunBusy
 	}
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
 	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
@@ -388,7 +396,8 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
-	attempt, err := latestAttempt(ctx, owner, repo, job, installationToken)
+	// The run may have completed and been rerun between the two calls.
+	attempt, err = latestAttempt(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return errors.Join(refused, err)
 	}

@@ -89,9 +89,16 @@ func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 	return server
 }
 
+// scheduled records the tasks the handler scheduled for later.
+type scheduled struct {
+	names []string
+	at    []time.Time
+}
+
 // failedJob delivers the completed task for a failed job "build" of run 7
-// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks.
-func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) int {
+// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks
+// along with the tasks it scheduled.
+func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
 	t.Helper()
 	t.Setenv("GCP_PROJECT", "p")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -100,10 +107,23 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 	}
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 
-	originalSecret, originalTransport, originalOptions, originalDelete := loadSecret, githubClient.Transport, computeOptions, deleteVM
+	originalSecret, originalTransport, originalOptions, originalDelete, originalSchedule := loadSecret, githubClient.Transport, computeOptions, deleteVM, schedule
 	t.Cleanup(func() {
-		loadSecret, githubClient.Transport, computeOptions, deleteVM = originalSecret, originalTransport, originalOptions, originalDelete
+		loadSecret, githubClient.Transport, computeOptions, deleteVM, schedule = originalSecret, originalTransport, originalOptions, originalDelete, originalSchedule
 	})
+	later := &scheduled{}
+	schedule = func(_ context.Context, path string, body []byte, name string, at time.Time) error {
+		if path != "/task/completed" {
+			t.Errorf("scheduled %s, want /task/completed", path)
+		}
+		var event WorkflowJobEvent
+		if err := json.Unmarshal(body, &event); err != nil || event.WorkflowJob.ID != 42 {
+			t.Errorf("scheduled body %s is not the job's completed event", body)
+		}
+		later.names = append(later.names, name)
+		later.at = append(later.at, at)
+		return nil
+	}
 	loadSecret = func(_ context.Context, name string) (string, error) {
 		return map[string]string{"gcrunner-app-id": "1", "gcrunner-private-key": keyPEM}[name], nil
 	}
@@ -126,7 +146,7 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 	request.Header.Set("X-CloudTasks-TaskName", "task-42")
 	response := httptest.NewRecorder()
 	HandleTask(response, request)
-	return response.Code
+	return response.Code, later
 }
 
 func TestOnlyAJobPreemptedWhileRunningIsRerun(t *testing.T) {
@@ -143,7 +163,7 @@ func TestOnlyAJobPreemptedWhileRunningIsRerun(t *testing.T) {
 		"preempted on the third attempt":  {3, []time.Time{during}, 0},
 	} {
 		gh := &github{rerunStatus: http.StatusCreated}
-		if code := failedJob(t, c.attempt, gh, c.preemptedAt...); code != http.StatusOK {
+		if code, _ := failedJob(t, c.attempt, gh, c.preemptedAt...); code != http.StatusOK {
 			t.Errorf("%s: status %d, want 200", name, code)
 		}
 		if gh.reruns != c.reruns {
@@ -167,32 +187,60 @@ func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 		"a namesake was rerun":      {map[string][]int{"build": {2, 1}}, http.StatusInternalServerError},
 	} {
 		gh := &github{rerunStatus: http.StatusForbidden, latest: c.latest}
-		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
+		if code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
 			t.Errorf("%s: status %d, want %d", name, code, c.code)
 		}
 	}
 }
 
 // GitHub refuses to rerun a job while any job of its run is still going, so
-// asking would only fail. A busy run is retried later without asking and
-// without an error, and the rerun goes out once the run has completed.
+// asking would only fail. A busy run is looked at again later from a task
+// scheduled for then, not a retry, and the rerun goes out once the run has
+// completed.
 func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
 	for name, c := range map[string]struct {
 		runStatus string
-		code      int
 		reruns    int
+		deferrals int
 	}{
-		"run queued":      {"queued", http.StatusServiceUnavailable, 0},
-		"run in progress": {"in_progress", http.StatusServiceUnavailable, 0},
-		"run completed":   {"completed", http.StatusOK, 1},
+		"run queued":      {"queued", 0, 1},
+		"run in progress": {"in_progress", 0, 1},
+		"run completed":   {"completed", 1, 0},
 	} {
 		gh := &github{runStatus: c.runStatus, rerunStatus: http.StatusCreated}
-		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
-			t.Errorf("%s: status %d, want %d", name, code, c.code)
+		before := time.Now()
+		code, later := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+		if code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", name, code)
 		}
 		if gh.reruns != c.reruns {
 			t.Errorf("%s: %d reruns, want %d", name, gh.reruns, c.reruns)
 		}
+		if len(later.names) != c.deferrals {
+			t.Errorf("%s: %d tasks scheduled, want %d", name, len(later.names), c.deferrals)
+		}
+		for i, at := range later.at {
+			if due := at.Sub(before); due < rerunDelay || due > rerunDelay+time.Minute {
+				t.Errorf("%s: task due in %s, want about %s", name, due, rerunDelay)
+			}
+			if want := fmt.Sprintf("job-42-rerun-%d", at.Unix()); later.names[i] != want {
+				t.Errorf("%s: task named %s, want %s", name, later.names[i], want)
+			}
+		}
+	}
+}
+
+// A rerun makes the run busy again, so a redelivery of the task after the
+// rerun took must not mistake that for a run still to be waited on: the job
+// already being on a later attempt settles it first.
+func TestARerunThatAlreadyTookIsNotWaitedOn(t *testing.T) {
+	gh := &github{runStatus: "in_progress", rerunStatus: http.StatusCreated, latest: map[string][]int{"build": {2}}}
+	code, later := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+	if code != http.StatusOK {
+		t.Errorf("status %d, want 200", code)
+	}
+	if gh.reruns != 0 || len(later.names) != 0 {
+		t.Errorf("%d reruns and %d scheduled tasks, want none", gh.reruns, len(later.names))
 	}
 }
 

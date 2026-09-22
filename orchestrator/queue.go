@@ -6,9 +6,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
 	taskspb "cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var (
@@ -28,6 +30,19 @@ func getCloudTasksClient(ctx context.Context) (*cloudtasks.Client, error) {
 // The task name is derived from the jobID to provide deduplication — if GitHub
 // retries a webhook, the same task name prevents double-enqueue.
 func enqueueTask(ctx context.Context, path string, payload []byte, jobID int64) error {
+	// Task IDs may only contain letters, numbers, hyphens, underscores.
+	// Convert path like "/task/queued" → "queued" for the suffix.
+	pathSuffix := path[strings.LastIndex(path, "/")+1:]
+	return createTask(ctx, path, payload, fmt.Sprintf("job-%d-%s", jobID, pathSuffix), nil)
+}
+
+// scheduleTask creates a task under the given name that Cloud Tasks delivers
+// no earlier than at.
+func scheduleTask(ctx context.Context, path string, payload []byte, name string, at time.Time) error {
+	return createTask(ctx, path, payload, name, timestamppb.New(at))
+}
+
+func createTask(ctx context.Context, path string, payload []byte, name string, at *timestamppb.Timestamp) error {
 	client, err := getCloudTasksClient(ctx)
 	if err != nil {
 		return fmt.Errorf("create cloud tasks client: %w", err)
@@ -48,15 +63,11 @@ func enqueueTask(ctx context.Context, path string, payload []byte, jobID int64) 
 		return fmt.Errorf("CLOUD_TASKS_SA_EMAIL environment variable not set")
 	}
 
-	// Task IDs may only contain letters, numbers, hyphens, underscores.
-	// Convert path like "/task/queued" → "queued" for the suffix.
-	pathSuffix := path[strings.LastIndex(path, "/")+1:]
-	taskName := fmt.Sprintf("%s/tasks/job-%d-%s", queuePath, jobID, pathSuffix)
-
 	req := &taskspb.CreateTaskRequest{
 		Parent: queuePath,
 		Task: &taskspb.Task{
-			Name: taskName,
+			Name:         queuePath + "/tasks/" + name,
+			ScheduleTime: at,
 			MessageType: &taskspb.Task_HttpRequest{
 				HttpRequest: &taskspb.HttpRequest{
 					Url:        cloudRunURL + path,
