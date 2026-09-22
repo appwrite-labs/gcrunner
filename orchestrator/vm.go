@@ -28,6 +28,35 @@ set -euo pipefail
 METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
 METADATA_HEADER="Metadata-Flavor: Google"
 
+# One attempt to delete this VM with its own service account, confirmed
+# through the operation Compute Engine returns: an accepted request can
+# still fail.
+delete_vm() {
+  local token zone name operation
+  token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
+  zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
+  name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
+  operation=$(curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
+    "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" | jq -r '.selfLink // empty' || true)
+  [ -n "${operation}" ] || return 1
+  curl -sf -X POST -H "Authorization: Bearer ${token}" "${operation}/wait" \
+    | jq -e '.status == "DONE" and (.error | not)' >/dev/null
+}
+
+# Delete this VM on every exit, a failed startup included, so a job that
+# ends without the orchestrator hearing about it does not leave the VM
+# running until the lifetime cap. The runner is gone by then, so nothing
+# else will delete a VM whose runner never got a job: keep trying through
+# a metadata or API hiccup.
+self_destruct() {
+  local attempt
+  for attempt in $(seq 10); do
+    delete_vm && return
+    sleep 30
+  done
+}
+trap self_destruct EXIT
+
 # Retrieve JIT config from instance metadata and delete it immediately
 JIT_CONFIG=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/attributes/jit-config")
 # Remove the metadata key so credentials are no longer queryable
@@ -65,8 +94,23 @@ if [ -f /etc/environment ]; then
   set +a
 fi
 
-# Run with JIT config (skips config.sh entirely)
-sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
+# A runner whose job was cancelled, or taken by another runner in the run,
+# while this VM booted would otherwise listen until the lifetime cap. The
+# listener announces a job the moment it is assigned, before the worker for
+# it exists, and the worker leaves a log of its own. Stopping the listener,
+# rather than deleting the VM under it, means no job can be assigned while
+# the deletion the exit below triggers is in flight.
+job_assigned() {
+  grep -q "Running job" /home/runner/runner.log 2>/dev/null || ls _diag/Worker_* >/dev/null 2>&1
+}
+(
+  sleep 600
+  job_assigned || pkill -INT -u runner -f Runner.Listener
+) >/dev/null 2>&1 &
+
+# Run with JIT config (skips config.sh entirely), keeping the output for
+# the watchdog.
+sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}" 2>&1 | tee /home/runner/runner.log
 `
 
 // registryScriptTemplate hands every job step the registry URLs through the

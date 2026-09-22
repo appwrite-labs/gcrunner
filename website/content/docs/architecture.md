@@ -83,7 +83,7 @@ VMs are ephemeral — one per job, created on demand, destroyed on completion. E
 3. Matches Docker's bridge MTU to the default-route NIC and restarts Docker before any job runs.
 4. Optionally starts the local cache server if a GCS bucket is configured.
 5. Registers with GitHub and picks up the job.
-6. Deletes itself when the job finishes.
+6. Deletes itself when the runner exits, whether the job finished or the runner never got one within ten minutes of listening.
 
 Every VM also carries a lifetime cap, the job's `timeout` label or six hours plus a boot allowance, after which Compute Engine deletes it on its own. A job GitHub cancelled while the VM was still booting, or a completed webhook that never reached the orchestrator, cannot leave a VM running longer than that.
 
