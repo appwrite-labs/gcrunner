@@ -126,7 +126,7 @@ func deliverWebhook(t *testing.T, event WorkflowJobEvent) int {
 func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 	collect := collectMetrics(t)
 	created := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
-	job := WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels, WorkflowName: "CI",
+	job := WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels, WorkflowName: "CI", RunnerName: "gcrunner-7-42",
 		CreatedAt: created, StartedAt: created.Add(90 * time.Second), CompletedAt: created.Add(690 * time.Second)}
 	repository := Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
 
@@ -159,6 +159,27 @@ func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 	}
 	if count, sum := histogram(t, collected, "gcrunner.job.duration", identity...); count != 1 || sum != 600 {
 		t.Errorf("job duration count=%d sum=%v, want one observation of 600s", count, sum)
+	}
+}
+
+func TestJobsCancelledWhileQueuedRecordNoDuration(t *testing.T) {
+	collect := collectMetrics(t)
+	created := time.Date(2026, 9, 20, 7, 29, 0, 0, time.UTC)
+	job := WorkflowJob{ID: 44, RunID: 8, Labels: gcrunnerLabels, WorkflowName: "Build", Conclusion: "cancelled",
+		CreatedAt: created, StartedAt: created, CompletedAt: created.Add(24 * time.Hour)}
+	repository := Repository{FullName: "appwrite/vibes", Name: "vibes", Owner: RepositoryOwner{Login: "appwrite"}}
+
+	if code := deliverWebhook(t, WorkflowJobEvent{Action: "completed", WorkflowJob: job, Repository: repository}); code != http.StatusOK {
+		t.Fatalf("completed webhook: status %d", code)
+	}
+
+	collected := collect()
+	identity := []attribute.KeyValue{attribute.String("repo_full_name", "appwrite/vibes"), attribute.String("workflow_name", "Build")}
+	if got := counter(t, collected, "gcrunner.jobs", append(identity, attribute.String("status", "completed"), attribute.String("conclusion", "cancelled"))...); got != 1 {
+		t.Errorf("cancelled jobs = %d, want 1", got)
+	}
+	if count, sum := histogram(t, collected, "gcrunner.job.duration", identity...); count != 0 {
+		t.Errorf("job duration count=%d sum=%v, want no observation for a job that never started", count, sum)
 	}
 }
 
