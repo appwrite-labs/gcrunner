@@ -188,6 +188,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		DefaultPermissions: map[string]string{
 			"actions":        "write",
 			"administration": "write",
+			"checks":         "write",
 			"contents":       "read",
 		},
 		DefaultEvents: []string{"workflow_job"},
@@ -502,17 +503,23 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 	}
 
 	labels, err := resolveJob(ctx, event, job)
-	if errors.Is(err, errConfiguration) {
-		// A retry cannot fix the workflow, so leave the job queued and say why.
-		log.Printf("Job %d: %v, leaving it queued", event.WorkflowJob.ID, err)
-		return nil
+	if err == nil {
+		log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
+		err = provisionVM(ctx, event, labels)
 	}
-	if err != nil {
+	if !errors.Is(err, errConfiguration) {
 		return err
 	}
-
-	log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
-	return provisionVM(ctx, event, labels)
+	// A retry cannot fix the workflow; a queued job cannot be failed, so the
+	// commit gets a failed check and the run is cancelled.
+	log.Printf("Job %d: %v, failing the run", event.WorkflowJob.ID, err)
+	if err := failRun(ctx, event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob, err); err != nil {
+		if !isForbidden(err) {
+			return fmt.Errorf("fail run for job %d: %w", event.WorkflowJob.ID, err)
+		}
+		log.Printf("Job %d: could not fail the run: %v", event.WorkflowJob.ID, err)
+	}
+	return nil
 }
 
 // Indirected so tests can drive HandleTask without Compute or GitHub.
