@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	computepb "cloud.google.com/go/compute/apiv1/computepb"
 )
 
 // What GCE answers for an image that no longer exists. It names the rejected
@@ -31,7 +33,7 @@ func provision(t *testing.T, fail map[string]error) ([]string, error) {
 	zoneOffset.Store(0)
 
 	var tried []string
-	withInsert(t, func(_ context.Context, _, zone, _ string, _ *RunnerLabels, _, _ string) error {
+	withInsert(t, func(_ context.Context, zone string, _ *computepb.Instance) error {
 		tried = append(tried, zone)
 		return fail[zone]
 	})

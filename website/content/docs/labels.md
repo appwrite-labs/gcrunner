@@ -26,6 +26,7 @@ runs-on: gcrunner=${{ github.run_id }}/machine=n2d-standard-8/disk=100gb/spot=fa
 | `disk-type` | `pd-ssd` | Boot disk type (e.g. `pd-ssd`, `pd-balanced`, `pd-standard`) |
 | `image` | `ubuntu24-full-x64` | Runner image (see [Images](#images)) |
 | `zone` | *(all zones in region)* | Zone or zone range to restrict placement (see [Zones](#zones)) |
+| `timeout` | `6h` | How long the job may run before Compute Engine deletes the VM, up to GitHub's `120h`. Raise it together with the job's `timeout-minutes`; boot time is allowed for on top. |
 
 ## Machine Type Resolution
 

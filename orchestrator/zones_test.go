@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	computepb "cloud.google.com/go/compute/apiv1/computepb"
 )
 
 var (
@@ -114,7 +116,7 @@ func TestZoneSelection(t *testing.T) {
 			zoneOffset.Store(0)
 
 			var tried []string
-			withInsert(t, func(_ context.Context, _, zone, _ string, _ *RunnerLabels, _, _ string) error {
+			withInsert(t, func(_ context.Context, zone string, _ *computepb.Instance) error {
 				tried = append(tried, zone)
 				return tt.fail[zone]
 			})
@@ -179,7 +181,7 @@ func TestConfiguredZones(t *testing.T) {
 	}
 }
 
-func withInsert(t *testing.T, fn func(ctx context.Context, name, zone, machineType string, labels *RunnerLabels, startupScript, jitConfig string) error) {
+func withInsert(t *testing.T, fn func(ctx context.Context, zone string, instance *computepb.Instance) error) {
 	t.Helper()
 	original := insertInstance
 	insertInstance = fn

@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
@@ -201,7 +202,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		}
 
 		startupScript := fmt.Sprintf(startupScriptTemplate, cacheBucket, owner, repo, dockerNetworkScript, registryScript(zone))
-		err := insertInstance(ctx, instanceName, zone, machineType, labels, startupScript, jitConfig)
+		err := insertInstance(ctx, zone, runnerInstance(instanceName, zone, machineType, labels, startupScript, jitConfig))
 		if err == nil {
 			recordVMCreate(ctx, zone, machineType, labels.Spot, outcomeCreated)
 			log.Printf("Created VM %s in %s (type=%s) for %s", instanceName, zone, machineType, repoFullName)
@@ -266,23 +267,39 @@ func rotate(zones []string, offset int) []string {
 	return append(append([]string{}, zones[start:]...), zones[:start]...)
 }
 
-// insertInstance is a seam so the zone loop can be exercised without GCE.
+// insertInstance is a seam so the zone loop and the instance handed to GCE
+// can be exercised without GCE.
 var insertInstance = createInstance
 
-func createInstance(ctx context.Context, name, zone, machineType string, labels *RunnerLabels, startupScript, jitConfig string) error {
+func createInstance(ctx context.Context, zone string, instance *computepb.Instance) error {
 	client, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
 		return fmt.Errorf("create compute client: %w", err)
 	}
 	defer client.Close()
 
+	op, err := client.Insert(ctx, &computepb.InsertInstanceRequest{
+		Project:          os.Getenv("GCP_PROJECT"),
+		Zone:             zone,
+		InstanceResource: instance,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Wait for the operation to complete
+	return op.Wait(ctx)
+}
+
+// runnerInstance describes the VM for one job as Compute Engine will see it.
+func runnerInstance(name, zone, machineType string, labels *RunnerLabels, startupScript, jitConfig string) *computepb.Instance {
 	project := os.Getenv("GCP_PROJECT")
 	machineType = fmt.Sprintf("zones/%s/machineTypes/%s", zone, machineType)
 	sourceImage := resolveSourceImage(labels.Image)
 
 	diskSizeGB := parseDiskSize(labels.Disk)
 
-	instance := &computepb.Instance{
+	return &computepb.Instance{
 		Name:        proto.String(name),
 		MachineType: proto.String(machineType),
 		Disks: []*computepb.AttachedDisk{
@@ -329,27 +346,43 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 				},
 			},
 		},
+		Scheduling: scheduling(labels),
 	}
+}
 
-	// Set spot scheduling if requested
+// GitHub stops a job after its timeout-minutes, six hours unless the workflow
+// says otherwise, and stops any self-hosted job after five days. A VM alive
+// longer than its job's timeout, plus the time it took to boot and register,
+// is not running its job: the runner never got one, or the completed webhook
+// that deletes the VM was lost.
+const (
+	defaultTimeout = 6 * time.Hour
+	longestTimeout = 5 * 24 * time.Hour
+	bootAllowance  = 15 * time.Minute
+)
+
+func lifetime(timeout string) time.Duration {
+	duration, err := time.ParseDuration(timeout)
+	if err != nil || duration <= 0 {
+		duration = defaultTimeout
+	}
+	return min(duration, longestTimeout) + bootAllowance
+}
+
+// scheduling caps every VM's lifetime so Compute Engine deletes it when the
+// cap passes, whatever state the runner or the orchestrator is in. Spot VMs
+// carry the same termination action for preemption.
+func scheduling(labels *RunnerLabels) *computepb.Scheduling {
+	scheduling := &computepb.Scheduling{
+		InstanceTerminationAction: proto.String("DELETE"),
+		MaxRunDuration: &computepb.Duration{
+			Seconds: proto.Int64(int64(lifetime(labels.Timeout).Seconds())),
+		},
+	}
 	if labels.Spot {
-		instance.Scheduling = &computepb.Scheduling{
-			ProvisioningModel:         proto.String("SPOT"),
-			InstanceTerminationAction: proto.String("DELETE"),
-		}
+		scheduling.ProvisioningModel = proto.String("SPOT")
 	}
-
-	op, err := client.Insert(ctx, &computepb.InsertInstanceRequest{
-		Project:          project,
-		Zone:             zone,
-		InstanceResource: instance,
-	})
-	if err != nil {
-		return err
-	}
-
-	// Wait for the operation to complete
-	return op.Wait(ctx)
+	return scheduling
 }
 
 // findInstanceZone returns the zone holding this VM, or "" when no VM of that
