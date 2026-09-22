@@ -215,6 +215,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 
 	// Determine zones to try
 	var zones []string
+	guessed := false
 	switch {
 	case labels.Zone != "":
 		zones = strings.Split(labels.Zone, "+")
@@ -226,6 +227,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		if zoneErr != nil {
 			log.Printf("Failed to discover zones for %s, using fallback: %v", region, zoneErr)
 			zones = []string{region + "-a", region + "-b", region + "-c"}
+			guessed = true
 		}
 		zones = rotate(zones, nextZoneOffset())
 	}
@@ -282,7 +284,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		}
 	}
 
-	if unmatched == len(zones) {
+	if unmatched == len(zones) && !guessed {
 		return fmt.Errorf("%w: %v", errConfiguration, lastErr)
 	}
 	if len(outOfQuota) == len(zones) {
@@ -450,7 +452,7 @@ func scheduling(labels *RunnerLabels) *computepb.Scheduling {
 // name exists. It searches the whole project, because a zone= label can place
 // a VM outside the configured region or in a zone ListZones does not report.
 func findInstanceZone(ctx context.Context, name string) (string, error) {
-	client, err := compute.NewInstancesRESTClient(ctx)
+	client, err := compute.NewInstancesRESTClient(ctx, computeOptions...)
 	if err != nil {
 		return "", fmt.Errorf("create compute client: %w", err)
 	}
@@ -480,7 +482,7 @@ func findInstanceZone(ctx context.Context, name string) (string, error) {
 
 const preemptedOperation = "compute.instances.preempted"
 
-// computeOptions let tests point the operations client at a server of their own.
+// computeOptions let tests point the lookup clients at a server of their own.
 var computeOptions []option.ClientOption
 
 // instancePreempted reports whether Compute Engine preempted this VM between

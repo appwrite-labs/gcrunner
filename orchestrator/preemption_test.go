@@ -47,6 +47,10 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
 		g.reruns++
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
+	case strings.HasSuffix(req.URL.Path, "/actions/runners/generate-jitconfig"):
+		return answer(http.StatusCreated, `{"encoded_jit_config": "jit"}`)
+	case strings.HasSuffix(req.URL.Path, "/actions/runners"):
+		return answer(http.StatusOK, `{"runners": []}`)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/check-runs":
 		var check map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&check); err != nil {

@@ -5,27 +5,63 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
+	"google.golang.org/api/option"
 )
 
+// engine is what Compute Engine answers while a job is provisioned: the
+// zones discovery reports (nil for a discovery failure), each zone's
+// machine catalogue (a missing zone cannot be read), and each zone's answer
+// to an insert.
+type engine struct {
+	zones     []string
+	catalogue map[string][]*MachineTypeInfo
+	insert    map[string]error
+}
+
+var fourVCPUs = []*MachineTypeInfo{{Name: "c3d-highcpu-4", Family: "c3d", VCPUs: 4, MemoryMB: 8192}}
+
 // queuedJob delivers the queued task for job "manifest" of run 7 asking for
-// preset "deploy", with the repository's config file as given and VM
-// provisioning failing with provision, and reports the status handed back.
-func queuedJob(t *testing.T, gh *github, config string, provision error) int {
+// preset "deploy", with the repository's config file and Compute as given,
+// and reports the status handed back.
+func queuedJob(t *testing.T, gh *github, config string, gce engine) int {
 	t.Helper()
+	t.Setenv("GCRUNNER_ZONES", "")
+	t.Setenv("GCE_REGION", "europe-west3")
+	t.Setenv("GCP_PROJECT", "p")
 	useGitHub(t, gh)
-	originalProvision, originalFetch := provisionVM, fetchRepositoryFile
+	originalFetch, originalZones, originalOptions := fetchRepositoryFile, listZones, computeOptions
 	t.Cleanup(func() {
-		provisionVM, fetchRepositoryFile = originalProvision, originalFetch
+		fetchRepositoryFile, listZones, computeOptions = originalFetch, originalZones, originalOptions
 		configCache.configs = map[string]configCacheEntry{}
+		zoneCache.zones = map[string]zoneCacheEntry{}
+		machineTypeCache.types = map[string]machineTypeCacheEntry{}
 	})
 	configCache.configs = map[string]configCacheEntry{}
+	zoneCache.zones = map[string]zoneCacheEntry{}
+	machineTypeCache.types = map[string]machineTypeCacheEntry{}
+	zoneOffset.Store(0)
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"items": {}}`) }))
+	t.Cleanup(empty.Close)
+	computeOptions = []option.ClientOption{option.WithEndpoint(empty.URL), option.WithoutAuthentication()}
 	fetchRepositoryFile = func(context.Context, string, string, string, string) ([]byte, error) { return []byte(config), nil }
-	provisionVM = func(context.Context, WorkflowJobEvent, *RunnerLabels) error { return provision }
+	listZones = func(context.Context, string, string) ([]string, error) {
+		if gce.zones == nil {
+			return nil, errors.New("compute unavailable")
+		}
+		return gce.zones, nil
+	}
+	withMachineTypes(t, func(_ context.Context, _, zone string) ([]*MachineTypeInfo, error) {
+		if types, ok := gce.catalogue[zone]; ok {
+			return types, nil
+		}
+		return nil, errors.New("compute unavailable in " + zone)
+	})
+	withInsert(t, func(_ context.Context, zone string, _ *computepb.Instance) error { return gce.insert[zone] })
 	return deliverTask(t, "/task/queued", WorkflowJobEvent{
 		Action:      "queued",
 		WorkflowJob: WorkflowJob{ID: 42, Name: "manifest", RunID: 7, HeadSHA: "6d8b388", Labels: []string{"gcrunner=7/runner=deploy"}},
@@ -33,19 +69,25 @@ func queuedJob(t *testing.T, gh *github, config string, provision error) int {
 	})
 }
 
-const deployConfig = "runners:\n  deploy:\n    family: c3d\n    cpu: 2\n    ram: 8\n"
+const (
+	twoVCPUsConfig  = "runners:\n  deploy:\n    family: c3d\n    cpu: 2\n    ram: 8\n"
+	exactNameConfig = "runners:\n  deploy:\n    machine: n2d-standard-999\n"
+)
 
 func TestAJobThatCanNeverStartFailsItsRunOnce(t *testing.T) {
+	missing := errors.New(missingMachineTypeError)
+	two := engine{zones: []string{"europe-west3-a", "europe-west3-b"}, catalogue: map[string][]*MachineTypeInfo{"europe-west3-a": fourVCPUs, "europe-west3-b": fourVCPUs}}
 	for name, c := range map[string]struct {
-		config    string
-		provision error
-		reason    string
+		config string
+		gce    engine
+		reason string
 	}{
-		"preset not defined":  {"runners:\n  build:\n    cpu: 4\n", nil, `runner "deploy" is not defined`},
-		"no matching machine": {deployConfig, fmt.Errorf("%w: %w", errConfiguration, errNoMachineType), "no machine type"},
+		"preset not defined":            {"runners:\n  build:\n    cpu: 4\n", two, `runner "deploy" is not defined`},
+		"no zone offers the size":       {twoVCPUsConfig, two, "no machine type matching"},
+		"no zone offers the exact name": {exactNameConfig, engine{zones: two.zones, insert: map[string]error{"europe-west3-a": missing, "europe-west3-b": missing}}, "does not exist"},
 	} {
 		gh := &github{checkStatus: http.StatusCreated}
-		if code := queuedJob(t, gh, c.config, c.provision); code != http.StatusOK {
+		if code := queuedJob(t, gh, c.config, c.gce); code != http.StatusOK {
 			t.Errorf("%s: status %d, want 200 so Cloud Tasks does not retry", name, code)
 		}
 		if len(gh.checks) != 1 || gh.cancels != 1 {
@@ -60,13 +102,29 @@ func TestAJobThatCanNeverStartFailsItsRunOnce(t *testing.T) {
 	}
 }
 
+// Only Compute answering in every zone proves the workflow wrong. A zone
+// that cannot be read, a zone out of quota, guessed zones after discovery
+// failed, and GitHub itself being down all leave the task to be retried.
 func TestATransientFailureIsRetriedWithoutFailingTheRun(t *testing.T) {
-	gh := &github{checkStatus: http.StatusCreated}
-	if code := queuedJob(t, gh, deployConfig, errors.New("every zone out of quota")); code != http.StatusInternalServerError {
-		t.Errorf("status %d, want 500 so Cloud Tasks retries", code)
-	}
-	if len(gh.checks) != 0 || gh.cancels != 0 {
-		t.Errorf("%d check runs and %d cancels, want none", len(gh.checks), gh.cancels)
+	missing := errors.New(missingMachineTypeError)
+	zones := []string{"europe-west3-a", "europe-west3-b"}
+	for name, c := range map[string]struct {
+		config string
+		gce    engine
+		check  int
+	}{
+		"one catalogue unreadable":  {twoVCPUsConfig, engine{zones: zones, catalogue: map[string][]*MachineTypeInfo{"europe-west3-a": fourVCPUs}}, http.StatusCreated},
+		"one zone out of quota":     {exactNameConfig, engine{zones: zones, insert: map[string]error{"europe-west3-a": missing, "europe-west3-b": errors.New("QUOTA_EXCEEDED")}}, http.StatusCreated},
+		"zones guessed":             {twoVCPUsConfig, engine{catalogue: map[string][]*MachineTypeInfo{"europe-west3-a": fourVCPUs, "europe-west3-b": fourVCPUs, "europe-west3-c": fourVCPUs}}, http.StatusCreated},
+		"GitHub down for the check": {twoVCPUsConfig, engine{zones: zones, catalogue: map[string][]*MachineTypeInfo{"europe-west3-a": fourVCPUs, "europe-west3-b": fourVCPUs}}, http.StatusBadGateway},
+	} {
+		gh := &github{checkStatus: c.check}
+		if code := queuedJob(t, gh, c.config, c.gce); code != http.StatusInternalServerError {
+			t.Errorf("%s: status %d, want 500 so Cloud Tasks retries", name, code)
+		}
+		if gh.cancels != 0 {
+			t.Errorf("%s: cancelled the run", name)
+		}
 	}
 }
 
@@ -74,65 +132,11 @@ func TestATransientFailureIsRetriedWithoutFailingTheRun(t *testing.T) {
 // grant it, so the task is still acknowledged.
 func TestARefusedCheckRunIsNotRetried(t *testing.T) {
 	gh := &github{checkStatus: http.StatusForbidden}
-	if code := queuedJob(t, gh, "runners: {}\n", nil); code != http.StatusOK {
+	if code := queuedJob(t, gh, "runners: {}\n", engine{}); code != http.StatusOK {
 		t.Errorf("status %d, want 200", code)
 	}
 	if gh.cancels != 0 {
 		t.Errorf("cancelled the run without having explained why")
-	}
-}
-
-// A size no zone offers is the workflow's mistake; a zone whose catalogue
-// cannot be read is not.
-func TestAMachineSizeNoZoneOffersIsAConfigurationError(t *testing.T) {
-	t.Setenv("GCRUNNER_ZONES", "europe-west3-a,us-east1-b")
-	t.Setenv("GCE_REGION", "europe-west3")
-	zoneOffset.Store(0)
-	withInsert(t, func(context.Context, string, *computepb.Instance) error {
-		t.Error("created a VM without a machine type")
-		return nil
-	})
-	catalogue := func(zones ...string) {
-		machineTypeCache.mu.Lock()
-		defer machineTypeCache.mu.Unlock()
-		machineTypeCache.types = map[string]machineTypeCacheEntry{}
-		for _, zone := range zones {
-			machineTypeCache.types[zone] = machineTypeCacheEntry{
-				types:     []*MachineTypeInfo{{Name: "c3d-highcpu-4", Family: "c3d", VCPUs: 4, MemoryMB: 8192}},
-				fetchedAt: time.Now(),
-			}
-		}
-	}
-	t.Cleanup(func() { catalogue() })
-	labels := &RunnerLabels{MachineMode: machineModeFamily, Family: "c3d", CPU: "2", RAM: "8"}
-
-	catalogue("europe-west3-a", "us-east1-b")
-	err := createRunnerInstance(context.Background(), labels, "vm", "jit", "owner", "repo")
-	if !errors.Is(err, errConfiguration) {
-		t.Errorf("both zones lack the size: %v, want a configuration error", err)
-	}
-
-	catalogue("europe-west3-a")
-	withMachineTypes(t, func(_ context.Context, _, zone string) ([]*MachineTypeInfo, error) {
-		return nil, errors.New("compute unavailable in " + zone)
-	})
-	err = createRunnerInstance(context.Background(), labels, "vm", "jit", "owner", "repo")
-	if errors.Is(err, errConfiguration) {
-		t.Errorf("one zone unreadable: %v, want a retryable error", err)
-	}
-}
-
-// An exact machine name skips the catalogue and is refused by the insert
-// instead; missing from every zone, that is the workflow's mistake too.
-func TestAnExactMachineNameNoZoneOffersIsAConfigurationError(t *testing.T) {
-	missing := errors.New(missingMachineTypeError)
-	_, err := provision(t, map[string]error{"europe-west3-a": missing, "europe-west1-b": missing, "us-central1-a": missing})
-	if !errors.Is(err, errConfiguration) {
-		t.Errorf("every zone refused the name: %v, want a configuration error", err)
-	}
-	_, err = provision(t, map[string]error{"europe-west3-a": missing, "europe-west1-b": errors.New("every zone out of quota"), "us-central1-a": missing})
-	if errors.Is(err, errConfiguration) {
-		t.Errorf("one zone failed for another reason: %v, want a retryable error", err)
 	}
 }
 

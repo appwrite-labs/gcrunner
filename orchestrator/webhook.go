@@ -510,6 +510,9 @@ func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
 	// commit gets a failed check and the run is cancelled.
 	log.Printf("Job %d: %v, failing the run", event.WorkflowJob.ID, err)
 	if err := failRun(ctx, event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob, err); err != nil {
+		if !isForbidden(err) {
+			return fmt.Errorf("fail run for job %d: %w", event.WorkflowJob.ID, err)
+		}
 		log.Printf("Job %d: could not fail the run: %v", event.WorkflowJob.ID, err)
 	}
 	return nil
