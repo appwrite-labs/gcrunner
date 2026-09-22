@@ -30,14 +30,21 @@ METADATA_HEADER="Metadata-Flavor: Google"
 
 # Delete this VM with its own service account, so a job that ends without
 # the orchestrator hearing about it does not leave the VM running until the
-# lifetime cap. Runs on every exit, a failed startup included.
+# lifetime cap. Runs on every exit, a failed startup included, and keeps
+# trying through a metadata or API hiccup: nothing else will delete a VM
+# whose runner never got a job.
 self_destruct() {
-  local token zone name
-  token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
-  zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
-  name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
-  curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
-    "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" >/dev/null || true
+  local attempt token zone name
+  for attempt in $(seq 10); do
+    token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
+    zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
+    name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
+    if curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
+      "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" >/dev/null; then
+      return
+    fi
+    sleep 30
+  done
 }
 trap self_destruct EXIT
 
