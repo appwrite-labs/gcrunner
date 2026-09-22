@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	computepb "cloud.google.com/go/compute/apiv1/computepb"
 )
 
 // bootVM runs the production startup script with the VM's outside world
@@ -22,8 +24,8 @@ func bootVM(t *testing.T, runner, clock string) []string {
 	zoneOffset.Store(0)
 
 	var script string
-	withInsert(t, func(_ context.Context, _, _, _ string, _ *RunnerLabels, startupScript, _ string) error {
-		script = startupScript
+	withInsert(t, func(_ context.Context, _ string, instance *computepb.Instance) error {
+		script = metadataItem(instance, "startup-script")
 		return nil
 	})
 	labels := &RunnerLabels{Machine: "n2-standard-2", MachineMode: "exact"}
