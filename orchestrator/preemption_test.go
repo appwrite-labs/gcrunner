@@ -24,12 +24,15 @@ var (
 )
 
 // github stands in for api.github.com: it answers the rerun request with
-// rerunStatus, lists the run's latest jobs from latest (name to attempts),
-// and counts the reruns it received.
+// rerunStatus and the check run with checkStatus, lists the run's latest
+// jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
 	rerunStatus int
+	checkStatus int
 	latest      map[string][]int
 	reruns      int
+	cancels     int
+	checks      []map[string]any
 }
 
 func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -44,6 +47,16 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
 		g.reruns++
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
+	case req.URL.Path == "/repos/appwrite-labs/cloud/check-runs":
+		var check map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&check); err != nil {
+			return answer(http.StatusBadRequest, `{}`)
+		}
+		g.checks = append(g.checks, check)
+		return answer(g.checkStatus, `{}`)
+	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7/cancel":
+		g.cancels++
+		return answer(http.StatusAccepted, ``)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7/jobs" && req.URL.Query().Get("filter") == "latest":
 		var jobs []string
 		for name, attempts := range g.latest {
@@ -81,45 +94,59 @@ func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 	return server
 }
 
-// failedJob delivers the completed task for a failed job "build" of run 7
-// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks.
-func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) int {
+// useGitHub puts gh behind githubClient with App credentials that sign.
+func useGitHub(t *testing.T, gh *github) {
 	t.Helper()
-	t.Setenv("GCP_PROJECT", "p")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
-
-	originalSecret, originalTransport, originalOptions, originalDelete := loadSecret, githubClient.Transport, computeOptions, deleteVM
-	t.Cleanup(func() {
-		loadSecret, githubClient.Transport, computeOptions, deleteVM = originalSecret, originalTransport, originalOptions, originalDelete
-	})
+	originalSecret, originalTransport := loadSecret, githubClient.Transport
+	t.Cleanup(func() { loadSecret, githubClient.Transport = originalSecret, originalTransport })
 	loadSecret = func(_ context.Context, name string) (string, error) {
 		return map[string]string{"gcrunner-app-id": "1", "gcrunner-private-key": keyPEM}[name], nil
 	}
 	githubClient.Transport = gh
-	computeOptions = []option.ClientOption{option.WithEndpoint(operations(t, preemptedAt...).URL), option.WithoutAuthentication()}
-	deleteVM = func(context.Context, string) error { return nil }
+}
 
-	body, err := json.Marshal(WorkflowJobEvent{
-		Action: "completed",
-		WorkflowJob: WorkflowJob{
-			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
-			Conclusion: "failure", StartedAt: jobStart, CompletedAt: jobEnd,
-		},
-		Repository: Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
-	})
+// deliverTask posts event to the task path as Cloud Tasks does and reports
+// the status handed back.
+func deliverTask(t *testing.T, path string, event WorkflowJobEvent) int {
+	t.Helper()
+	body, err := json.Marshal(event)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/task/completed", strings.NewReader(string(body)))
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
 	request.Header.Set("X-CloudTasks-TaskName", "task-42")
 	response := httptest.NewRecorder()
 	HandleTask(response, request)
 	return response.Code
 }
+
+// failedJob delivers the completed task for a failed job "build" of run 7
+// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks.
+func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) int {
+	t.Helper()
+	t.Setenv("GCP_PROJECT", "p")
+	useGitHub(t, gh)
+	originalOptions, originalDelete := computeOptions, deleteVM
+	t.Cleanup(func() { computeOptions, deleteVM = originalOptions, originalDelete })
+	computeOptions = []option.ClientOption{option.WithEndpoint(operations(t, preemptedAt...).URL), option.WithoutAuthentication()}
+	deleteVM = func(context.Context, string) error { return nil }
+
+	return deliverTask(t, "/task/completed", WorkflowJobEvent{
+		Action: "completed",
+		WorkflowJob: WorkflowJob{
+			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
+			Conclusion: "failure", StartedAt: jobStart, CompletedAt: jobEnd,
+		},
+		Repository: cloudRepository,
+	})
+}
+
+var cloudRepository = Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
 
 func TestOnlyAJobPreemptedWhileRunningIsRerun(t *testing.T) {
 	during := jobStart.Add(5 * time.Minute)

@@ -1,6 +1,7 @@
 package function
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -366,7 +367,7 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 		return fmt.Errorf("get installation token: %w", err)
 	}
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
-	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
+	resp, err := githubRequest(ctx, "POST", endpoint, installationToken, nil)
 	if err != nil {
 		return err
 	}
@@ -396,7 +397,7 @@ func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, ins
 	earliest := 0
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d", owner, repo, job.RunID, perPage, page)
-		resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
+		resp, err := githubRequest(ctx, "GET", endpoint, installationToken, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -424,12 +425,69 @@ func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, ins
 	}
 }
 
-func githubRequest(ctx context.Context, method, endpoint, installationToken string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+func githubRequest(ctx context.Context, method, endpoint, installationToken string, body any) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+installationToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if reader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return githubClient.Do(req)
+}
+
+// failRun reports a job that can never start: a failed check on its commit
+// carrying the reason, then a cancel of the run so it does not wait a day.
+func failRun(ctx context.Context, owner, repo string, job WorkflowJob, reason error) error {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	check := map[string]any{
+		"name":       "gcrunner",
+		"head_sha":   job.HeadSHA,
+		"status":     "completed",
+		"conclusion": "failure",
+		"output": map[string]string{
+			"title":   job.Name + " cannot start",
+			"summary": reason.Error() + ". Fix " + configPath + " or the runs-on label and re-run the workflow.",
+		},
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/check-runs", owner, repo)
+	if err := expect(githubRequest(ctx, "POST", endpoint, installationToken, check))(http.StatusCreated); err != nil {
+		return fmt.Errorf("create check run: %w", err)
+	}
+	endpoint = fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/cancel", owner, repo, job.RunID)
+	if err := expect(githubRequest(ctx, "POST", endpoint, installationToken, nil))(http.StatusAccepted, http.StatusConflict); err != nil {
+		return fmt.Errorf("cancel run %d: %w", job.RunID, err)
+	}
+	return nil
+}
+
+// expect closes the response and returns a githubError unless its status is
+// one of those given.
+func expect(resp *http.Response, err error) func(statuses ...int) error {
+	return func(statuses ...int) error {
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		for _, status := range statuses {
+			if resp.StatusCode == status {
+				return nil
+			}
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		return &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	}
 }

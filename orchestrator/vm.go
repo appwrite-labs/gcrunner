@@ -232,6 +232,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 
 	var lastErr error
 	var outOfQuota []string
+	unmatched := 0
 	for _, zone := range zones {
 		// Resolve machine type per zone if not exact
 		machineType := labels.Machine
@@ -241,6 +242,9 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 				log.Printf("Failed to resolve machine type in %s: %v, trying next zone", zone, resolveErr)
 				recordVMCreate(ctx, zone, labels.Machine, labels.Spot, outcomeUnresolved)
 				lastErr = resolveErr
+				if errors.Is(resolveErr, errNoMachineType) {
+					unmatched++
+				}
 				continue
 			}
 			machineType = resolved
@@ -274,6 +278,9 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 		}
 	}
 
+	if unmatched == len(zones) {
+		return fmt.Errorf("%w: %v", errConfiguration, lastErr)
+	}
 	if len(outOfQuota) == len(zones) {
 		return fmt.Errorf("every zone out of quota: %w", lastErr)
 	}

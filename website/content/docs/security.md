@@ -67,6 +67,7 @@ Task names are derived from the job ID, which deduplicates retries and prevents 
 The GitHub App is configured with minimal scopes:
 - `actions: write` — to read workflow job metadata and re-run a job whose Spot VM was preempted
 - `administration: write` — to register and deregister runners
+- `checks: write` — to report a job that can never start as a failed check on its commit
 
 It receives only `workflow_job` webhook events. It is not listed publicly on the GitHub Marketplace.
 
