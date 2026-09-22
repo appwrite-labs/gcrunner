@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	computepb "cloud.google.com/go/compute/apiv1/computepb"
 )
 
 // startVM creates a VM for a job and boots it: the startup script handed to
@@ -22,8 +25,8 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	zoneOffset.Store(0)
 
 	var script string
-	withInsert(t, func(_ context.Context, _, zone, _ string, _ *RunnerLabels, startupScript, _ string) error {
-		script = startupScript
+	withInsert(t, func(_ context.Context, zone string, instance *computepb.Instance) error {
+		script = metadataItem(instance, "startup-script")
 		return fail[zone]
 	})
 	labels := &RunnerLabels{Machine: "n2-standard-2", MachineMode: "exact"}
@@ -56,6 +59,16 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	if err != nil || strings.TrimSpace(string(mtu)) != "1460" {
 		t.Fatalf("runner started without the configured bridge: MTU=%q, error=%v", mtu, err)
 	}
+}
+
+// metadataItem is what the VM will read for this key from its metadata server.
+func metadataItem(instance *computepb.Instance, key string) string {
+	for _, item := range instance.GetMetadata().GetItems() {
+		if item.GetKey() == key {
+			return item.GetValue()
+		}
+	}
+	return ""
 }
 
 // jobEnvironment is the extra environment the runner loads from .env into
@@ -214,27 +227,42 @@ func TestRegistryIsAddedToTheImagesDockerConfig(t *testing.T) {
 	}
 }
 
-// Every VM gets a lifetime cap Compute Engine enforces itself, so a runner that
-// never got a job or a lost completed webhook cannot leave it running for days.
+// Every VM is handed to Compute Engine with a lifetime cap it enforces itself,
+// so a runner that never got a job or a lost completed webhook cannot leave
+// the VM running for days. The cap outlives the job's own timeout by the time
+// the VM needs to boot and register, and never passes GitHub's five-day limit
+// on a self-hosted job.
 func TestEveryVMIsDeletedWhenItsLifetimeCapPasses(t *testing.T) {
+	const day = 24 * time.Hour
 	for _, tt := range []struct {
-		name, timeout string
+		name, label   string
 		spot          bool
-		wantSeconds   int64
+		jobTimeout    time.Duration
+		wantCapWithin time.Duration
 	}{
-		{name: "default", timeout: "6h", spot: true, wantSeconds: 6 * 60 * 60},
-		{name: "on-demand", timeout: "6h", wantSeconds: 6 * 60 * 60},
-		{name: "explicit", timeout: "90m", wantSeconds: 90 * 60},
-		{name: "past GitHub's longest job", timeout: "48h", wantSeconds: 24 * 60 * 60},
-		{name: "unparseable", timeout: "soon", wantSeconds: 6 * 60 * 60},
+		{name: "GitHub's default timeout", label: "gcrunner=test", spot: true, jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
+		{name: "on-demand", label: "gcrunner=test/spot=false", jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
+		{name: "a job that raised timeout-minutes", label: "gcrunner=test/timeout=90m", spot: true, jobTimeout: 90 * time.Minute, wantCapWithin: time.Hour},
+		{name: "past GitHub's five-day limit", label: "gcrunner=test/timeout=200h", spot: true, jobTimeout: 5 * day, wantCapWithin: 0},
+		{name: "unparseable", label: "gcrunner=test/timeout=soon", spot: true, jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := scheduling(&RunnerLabels{Spot: tt.spot, Timeout: tt.timeout})
-			if got.GetInstanceTerminationAction() != "DELETE" {
-				t.Errorf("termination action = %q, want DELETE", got.GetInstanceTerminationAction())
+			t.Setenv("GCRUNNER_ZONES", "us-east1-b")
+			t.Setenv("GCE_REGION", "us-east1")
+			var got *computepb.Scheduling
+			withInsert(t, func(_ context.Context, _ string, instance *computepb.Instance) error {
+				got = instance.GetScheduling()
+				return nil
+			})
+			if err := createRunnerInstance(context.Background(), parseLabels([]string{tt.label}), "vm", "jit", "owner", "repo"); err != nil {
+				t.Fatalf("createRunnerInstance: %v", err)
 			}
-			if got.GetMaxRunDuration().GetSeconds() != tt.wantSeconds {
-				t.Errorf("max run duration = %ds, want %ds", got.GetMaxRunDuration().GetSeconds(), tt.wantSeconds)
+			if got.GetInstanceTerminationAction() != "DELETE" {
+				t.Errorf("VM is %q when the cap passes, want deleted", got.GetInstanceTerminationAction())
+			}
+			cap := time.Duration(got.GetMaxRunDuration().GetSeconds()) * time.Second
+			if cap < tt.jobTimeout || cap > tt.jobTimeout+tt.wantCapWithin {
+				t.Errorf("VM lives %v, want at least the job's %v and no more than %v past it", cap, tt.jobTimeout, tt.wantCapWithin)
 			}
 			if spot := got.GetProvisioningModel() == "SPOT"; spot != tt.spot {
 				t.Errorf("provisioning model = %q, want spot=%v", got.GetProvisioningModel(), tt.spot)

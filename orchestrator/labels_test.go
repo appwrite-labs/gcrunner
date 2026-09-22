@@ -221,7 +221,4 @@ func TestParseLabels_TimeoutLabel(t *testing.T) {
 	if labels.Timeout != "90m" {
 		t.Errorf("Timeout = %q, want %q", labels.Timeout, "90m")
 	}
-	if labels := parseLabels([]string{"gcrunner=test"}); labels.Timeout != "6h" {
-		t.Errorf("default Timeout = %q, want %q", labels.Timeout, "6h")
-	}
 }
