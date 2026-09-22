@@ -469,7 +469,9 @@ var computeOptions []option.ClientOption
 
 // instancePreempted reports whether Compute Engine preempted this VM between
 // the two times. The VM is gone by the time anyone asks, so its zone is
-// unknown and the operations are searched across the whole project. The
+// unknown and the operations are searched across the whole project. The API
+// filter can only match a target by its full zonal URL, so it narrows the
+// search to preemptions and the instance is picked out by name here. The
 // window keeps a preemption of an idle VM, after its job had already finished,
 // from passing off a real failure as one.
 func instancePreempted(ctx context.Context, name string, from, until time.Time) (bool, error) {
@@ -479,10 +481,9 @@ func instancePreempted(ctx context.Context, name string, from, until time.Time) 
 	}
 	defer client.Close()
 
-	filter := fmt.Sprintf("operationType = %q AND targetLink ~ \"/instances/%s$\"", preemptedOperation, name)
 	it := client.AggregatedList(ctx, &computepb.AggregatedListGlobalOperationsRequest{
 		Project:              os.Getenv("GCP_PROJECT"),
-		Filter:               proto.String(filter),
+		Filter:               proto.String(fmt.Sprintf("operationType = %q", preemptedOperation)),
 		ReturnPartialSuccess: proto.Bool(true),
 	})
 	for {

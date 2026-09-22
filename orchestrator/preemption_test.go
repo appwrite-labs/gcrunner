@@ -25,12 +25,13 @@ var (
 )
 
 // github stands in for api.github.com behind githubClient. It issues
-// installation tokens, answers the rerun request with rerunStatus, reports
-// the run as being on runAttempt, and records every rerun it was asked for.
+// installation tokens, answers the rerun request with rerunStatus, lists the
+// run's latest jobs as latest, by name and attempt, and records every rerun
+// it was asked for.
 type github struct {
 	t           *testing.T
 	rerunStatus int
-	runAttempt  int
+	latest      map[string]int
 	mu          sync.Mutex
 	reruns      []string
 }
@@ -55,27 +56,41 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 			return answer(http.StatusCreated, `{}`)
 		}
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
-	case strings.HasPrefix(req.URL.Path, "/repos/appwrite-labs/cloud/actions/runs/"):
-		return answer(http.StatusOK, fmt.Sprintf(`{"run_attempt": %d}`, g.runAttempt))
+	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7/jobs" && req.URL.Query().Get("filter") == "latest":
+		var jobs []string
+		for name, attempt := range g.latest {
+			jobs = append(jobs, fmt.Sprintf(`{"name": %q, "run_attempt": %d}`, name, attempt))
+		}
+		return answer(http.StatusOK, fmt.Sprintf(`{"jobs": [%s]}`, strings.Join(jobs, ",")))
 	}
 	g.t.Errorf("unexpected GitHub request %s %s", req.Method, req.URL.Path)
 	return answer(http.StatusNotFound, `{}`)
 }
 
 // operations stands in for the Compute Engine operations API: a project whose
-// only recorded preemptions are those of gcrunner-7-42 at the given times.
+// recorded preemptions are those of gcrunner-7-42 at the given times, plus
+// one of another VM in the middle of the job window. It accepts only the
+// filter forms the real API does.
 func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 	t.Helper()
-	var operations []string
+	operation := func(instance string, at time.Time) string {
+		return fmt.Sprintf(`{"operationType": "compute.instances.preempted", "status": "DONE", `+
+			`"targetLink": "https://www.googleapis.com/compute/v1/projects/p/zones/us-central1-a/instances/%s", `+
+			`"insertTime": %q}`, instance, at.Format(time.RFC3339Nano))
+	}
+	operations := []string{operation("gcrunner-7-41", jobStart.Add(10*time.Minute))}
 	for _, at := range preemptedAt {
-		operations = append(operations, fmt.Sprintf(`{"operationType": "compute.instances.preempted", "status": "DONE", `+
-			`"targetLink": "https://www.googleapis.com/compute/v1/projects/p/zones/us-central1-a/instances/gcrunner-7-42", `+
-			`"insertTime": %q}`, at.Format(time.RFC3339Nano)))
+		operations = append(operations, operation("gcrunner-7-42", at))
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/projects/p/aggregated/operations") {
 			t.Errorf("unexpected Compute request %s", r.URL.Path)
 			http.NotFound(w, r)
+			return
+		}
+		if filter := r.URL.Query().Get("filter"); filter != `operationType = "compute.instances.preempted"` {
+			t.Errorf("filter %q is not one the Compute API accepts", filter)
+			http.Error(w, `{"error": {"message": "Invalid list filter expression."}}`, http.StatusBadRequest)
 			return
 		}
 		fmt.Fprintf(w, `{"items": {"zones/us-central1-a": {"operations": [%s]}}}`, strings.Join(operations, ","))
@@ -112,7 +127,7 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 	body, err := json.Marshal(WorkflowJobEvent{
 		Action: "completed",
 		WorkflowJob: WorkflowJob{
-			ID: 42, RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
+			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
 			Conclusion: "failure", StartedAt: jobStart, CompletedAt: jobEnd,
 		},
 		Repository: Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
@@ -165,10 +180,11 @@ func TestRerunsStopAtTheThirdAttempt(t *testing.T) {
 }
 
 // Cloud Tasks may deliver the completed task twice. GitHub refuses the second
-// rerun, and the run already being on the next attempt shows the first one
+// rerun, and the job already running on the next attempt shows the first one
 // took, so the task is acknowledged rather than retried forever.
 func TestARerunGitHubAlreadyStartedIsDone(t *testing.T) {
-	code, _ := failedJob(t, 1, &github{rerunStatus: http.StatusForbidden, runAttempt: 2}, jobStart.Add(5*time.Minute))
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 2, "lint": 1}}
+	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
 	if code != http.StatusOK {
 		t.Errorf("status %d, want 200 so Cloud Tasks drops the task", code)
 	}
@@ -178,9 +194,22 @@ func TestARerunGitHubAlreadyStartedIsDone(t *testing.T) {
 // refuses it for good when the App lacks actions: write. Neither started an
 // attempt, so the task must come back rather than leave the job failed.
 func TestARerunGitHubRefusedIsRetried(t *testing.T) {
-	code, _ := failedJob(t, 1, &github{rerunStatus: http.StatusForbidden, runAttempt: 1}, jobStart.Add(5*time.Minute))
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 1, "lint": 1}}
+	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
 	if code != http.StatusInternalServerError {
 		t.Errorf("status %d, want 500 so Cloud Tasks retries", code)
+	}
+}
+
+// Two jobs of one run preempted together: rerunning the first moves the run
+// to its next attempt, and GitHub refuses the second while that attempt runs.
+// The run having advanced proves nothing about the second job, which is still
+// on its first attempt, so its task must come back rather than be dropped.
+func TestASiblingsRerunDoesNotCountForThisJob(t *testing.T) {
+	gh := &github{rerunStatus: http.StatusForbidden, latest: map[string]int{"build": 1, "lint": 2}}
+	code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+	if code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500 so the job is rerun once the run settles", code)
 	}
 }
 

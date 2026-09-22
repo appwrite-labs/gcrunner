@@ -65,7 +65,7 @@ Task names are derived from the job ID, which deduplicates retries and prevents 
 **Attack vector:** A compromised GitHub App token is used to access repositories or perform unintended actions.
 
 The GitHub App is configured with minimal scopes:
-- `actions: read` — to read workflow job metadata
+- `actions: write` — to read workflow job metadata and re-run a job whose Spot VM was preempted
 - `administration: write` — to register and deregister runners
 
 It receives only `workflow_job` webhook events. It is not listed publicly on the GitHub Marketplace.

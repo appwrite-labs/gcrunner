@@ -186,7 +186,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		RedirectURL: functionURL + "/setup/callback",
 		Public:      false,
 		DefaultPermissions: map[string]string{
-			"actions":        "read",
+			"actions":        "write",
 			"administration": "write",
 			"contents":       "read",
 		},
@@ -622,6 +622,7 @@ type WorkflowJobEvent struct {
 
 type WorkflowJob struct {
 	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
 	RunID        int64     `json:"run_id"`
 	HeadSHA      string    `json:"head_sha"`
 	Labels       []string  `json:"labels"`
