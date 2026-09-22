@@ -378,6 +378,11 @@ func runnerInstance(name, zone, machineType string, labels *RunnerLabels, startu
 					Key:   proto.String("jit-config"),
 					Value: proto.String(jitConfig),
 				},
+				{
+					// Off by default; the only record left once the VM deletes itself.
+					Key:   proto.String("serial-port-logging-enable"),
+					Value: proto.String("true"),
+				},
 			},
 		},
 		Labels: map[string]string{
