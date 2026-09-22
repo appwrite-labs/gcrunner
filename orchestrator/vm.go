@@ -28,6 +28,19 @@ set -euo pipefail
 METADATA_URL="http://metadata.google.internal/computeMetadata/v1"
 METADATA_HEADER="Metadata-Flavor: Google"
 
+# Delete this VM with its own service account, so a job that ends without
+# the orchestrator hearing about it does not leave the VM running until the
+# lifetime cap. Runs on every exit, a failed startup included.
+self_destruct() {
+  local token zone name
+  token=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/service-accounts/default/token" | jq -r .access_token || true)
+  zone=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/zone" || true)
+  name=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/name" || true)
+  curl -sf -X DELETE -H "Authorization: Bearer ${token}" \
+    "https://compute.googleapis.com/compute/v1/${zone}/instances/${name}" >/dev/null || true
+}
+trap self_destruct EXIT
+
 # Retrieve JIT config from instance metadata and delete it immediately
 JIT_CONFIG=$(curl -sf -H "${METADATA_HEADER}" "${METADATA_URL}/instance/attributes/jit-config")
 # Remove the metadata key so credentials are no longer queryable
@@ -64,6 +77,14 @@ if [ -f /etc/environment ]; then
   . /etc/environment
   set +a
 fi
+
+# A runner whose job was cancelled, or taken by another runner in the run,
+# while this VM booted would otherwise listen until the lifetime cap. The
+# runner starts a worker for its job, which leaves a log behind.
+(
+  sleep 600
+  ls _diag/Worker_* >/dev/null 2>&1 || self_destruct
+) >/dev/null 2>&1 &
 
 # Run with JIT config (skips config.sh entirely)
 sudo -u runner -E ./run.sh --jitconfig "${JIT_CONFIG}"
