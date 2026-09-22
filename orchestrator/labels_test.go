@@ -212,3 +212,16 @@ func TestResolveMachineType_ExplicitDefaultMachineWithCPU(t *testing.T) {
 		t.Errorf("resolved %q, want the machine the job asked for", got)
 	}
 }
+
+func TestParseLabels_TimeoutLabel(t *testing.T) {
+	labels := parseLabels([]string{"gcrunner=test/timeout=90m"})
+	if labels == nil {
+		t.Fatal("expected labels, got nil")
+	}
+	if labels.Timeout != "90m" {
+		t.Errorf("Timeout = %q, want %q", labels.Timeout, "90m")
+	}
+	if labels := parseLabels([]string{"gcrunner=test"}); labels.Timeout != "6h" {
+		t.Errorf("default Timeout = %q, want %q", labels.Timeout, "6h")
+	}
+}

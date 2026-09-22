@@ -213,3 +213,32 @@ func TestRegistryIsAddedToTheImagesDockerConfig(t *testing.T) {
 		t.Errorf("credential helpers %v, want the image's ghcr.io entry kept alongside the registry hosts", helpers)
 	}
 }
+
+// Every VM gets a lifetime cap Compute Engine enforces itself, so a runner that
+// never got a job or a lost completed webhook cannot leave it running for days.
+func TestEveryVMIsDeletedWhenItsLifetimeCapPasses(t *testing.T) {
+	for _, tt := range []struct {
+		name, timeout string
+		spot          bool
+		wantSeconds   int64
+	}{
+		{name: "default", timeout: "6h", spot: true, wantSeconds: 6 * 60 * 60},
+		{name: "on-demand", timeout: "6h", wantSeconds: 6 * 60 * 60},
+		{name: "explicit", timeout: "90m", wantSeconds: 90 * 60},
+		{name: "past GitHub's longest job", timeout: "48h", wantSeconds: 24 * 60 * 60},
+		{name: "unparseable", timeout: "soon", wantSeconds: 6 * 60 * 60},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scheduling(&RunnerLabels{Spot: tt.spot, Timeout: tt.timeout})
+			if got.GetInstanceTerminationAction() != "DELETE" {
+				t.Errorf("termination action = %q, want DELETE", got.GetInstanceTerminationAction())
+			}
+			if got.GetMaxRunDuration().GetSeconds() != tt.wantSeconds {
+				t.Errorf("max run duration = %ds, want %ds", got.GetMaxRunDuration().GetSeconds(), tt.wantSeconds)
+			}
+			if spot := got.GetProvisioningModel() == "SPOT"; spot != tt.spot {
+				t.Errorf("provisioning model = %q, want spot=%v", got.GetProvisioningModel(), tt.spot)
+			}
+		})
+	}
+}

@@ -85,6 +85,8 @@ VMs are ephemeral — one per job, created on demand, destroyed on completion. E
 5. Registers with GitHub and picks up the job.
 6. Deletes itself when the job finishes.
 
+Every VM also carries a lifetime cap, six hours unless the job sets a `timeout` label, after which Compute Engine deletes it on its own. A job GitHub cancelled while the VM was still booting, or a completed webhook that never reached the orchestrator, cannot leave a VM running longer than that.
+
 The boot disk is set to auto-delete, so no data persists after the VM is gone.
 
 #### Docker network MTU

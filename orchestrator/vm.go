@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
@@ -331,13 +332,7 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 		},
 	}
 
-	// Set spot scheduling if requested
-	if labels.Spot {
-		instance.Scheduling = &computepb.Scheduling{
-			ProvisioningModel:         proto.String("SPOT"),
-			InstanceTerminationAction: proto.String("DELETE"),
-		}
-	}
+	instance.Scheduling = scheduling(labels)
 
 	op, err := client.Insert(ctx, &computepb.InsertInstanceRequest{
 		Project:          project,
@@ -350,6 +345,39 @@ func createInstance(ctx context.Context, name, zone, machineType string, labels 
 
 	// Wait for the operation to complete
 	return op.Wait(ctx)
+}
+
+// GitHub stops a job after its timeout-minutes, six hours unless the workflow
+// says otherwise, and never lets one run past a day. A VM alive longer than
+// that is not running its job: the runner never got one, or the completed
+// webhook that deletes the VM was lost.
+const (
+	defaultRunDuration = 6 * time.Hour
+	longestRunDuration = 24 * time.Hour
+)
+
+func parseTimeout(timeout string) time.Duration {
+	duration, err := time.ParseDuration(timeout)
+	if err != nil || duration <= 0 {
+		return defaultRunDuration
+	}
+	return min(duration, longestRunDuration)
+}
+
+// scheduling caps every VM's lifetime so Compute Engine deletes it when the
+// cap passes, whatever state the runner or the orchestrator is in. Spot VMs
+// carry the same termination action for preemption.
+func scheduling(labels *RunnerLabels) *computepb.Scheduling {
+	scheduling := &computepb.Scheduling{
+		InstanceTerminationAction: proto.String("DELETE"),
+		MaxRunDuration: &computepb.Duration{
+			Seconds: proto.Int64(int64(parseTimeout(labels.Timeout).Seconds())),
+		},
+	}
+	if labels.Spot {
+		scheduling.ProvisioningModel = proto.String("SPOT")
+	}
+	return scheduling
 }
 
 // findInstanceZone returns the zone holding this VM, or "" when no VM of that

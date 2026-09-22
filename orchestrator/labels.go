@@ -14,6 +14,7 @@ const (
 	labelCPU      = "cpu"
 	labelRAM      = "ram"
 	labelZone     = "zone"
+	labelTimeout  = "timeout"
 )
 
 const (
@@ -32,6 +33,7 @@ var defaultSettings = Settings{
 	labelDisk:     "75gb",
 	labelDiskType: "pd-ssd",
 	labelImage:    "ubuntu24-full-x64",
+	labelTimeout:  "6h",
 }
 
 // RunnerLabels holds the resolved gcrunner configuration for a job.
@@ -46,6 +48,7 @@ type RunnerLabels struct {
 	CPU      string // "4" or "2+8" (range)
 	RAM      string // "16" or "8+32" (range)
 	Zone     string // "us-central1-a" or "us-central1-a+us-central1-b"
+	Timeout  string // Longest the VM may live, e.g. "6h" or "90m"
 	// MachineMode is computed after parsing:
 	//   "exact"  — Machine is set, use as-is
 	//   "family" — Family is set, resolve with cpu/ram constraints
@@ -125,6 +128,7 @@ func (j *JobLabels) runner(preset Settings) *RunnerLabels {
 		CPU:         settings[labelCPU],
 		RAM:         settings[labelRAM],
 		Zone:        settings[labelZone],
+		Timeout:     settings[labelTimeout],
 		MachineMode: classifyMachineMode(explicit),
 	}
 }
