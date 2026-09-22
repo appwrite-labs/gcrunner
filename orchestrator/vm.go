@@ -468,12 +468,10 @@ const preemptedOperation = "compute.instances.preempted"
 var computeOptions []option.ClientOption
 
 // instancePreempted reports whether Compute Engine preempted this VM between
-// the two times. The VM is gone by the time anyone asks, so its zone is
-// unknown and the operations are searched across the whole project. The API
-// filter can only match a target by its full zonal URL, so it narrows the
-// search to preemptions and the instance is picked out by name here. The
-// window keeps a preemption of an idle VM, after its job had already finished,
-// from passing off a real failure as one.
+// the two times. The VM is gone by then, so its zone is unknown, the whole
+// project is searched, and since the API filter matches a target only by its
+// full zonal URL the instance is picked out by name here. The window keeps a
+// preemption of an idle VM from passing off its job's real failure as one.
 func instancePreempted(ctx context.Context, name string, from, until time.Time) (bool, error) {
 	client, err := compute.NewGlobalOperationsRESTClient(ctx, computeOptions...)
 	if err != nil {

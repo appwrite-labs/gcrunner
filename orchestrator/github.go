@@ -355,13 +355,11 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	return nil
 }
 
-// rerunWorkflowJob re-queues a job and its dependents as a new attempt of
-// its run. GitHub answers 403 for a rerun it will not start, whether because
-// the run is still busy with other jobs, an earlier call already started the
-// attempt, or the App lacks actions: write. Only the second is done, and only
-// for this job: a sibling's rerun advances the run just the same, so the
-// proof is this job's name appearing in the run's latest jobs on a later
-// attempt. Anything else is an error so the task comes back later.
+// rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
+// run. GitHub refuses a rerun while the run is busy, when an earlier call
+// already started it, and when the App lacks actions: write. Only a rerun
+// that took is done, shown by this job being on a later attempt; anything
+// else is an error so the task comes back later.
 func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
@@ -391,10 +389,8 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 
 // latestAttempt returns the earliest attempt among the run's latest jobs of
 // this job's name, or zero when there is none. A rerun gives the job a new
-// id, so its name is the only link across attempts, and a job left alone by
-// a rerun of its siblings keeps its earlier attempt in that list. Two jobs
-// can share a name, so the earliest of them speaks for the rerun: it counts
-// as started only once every job of that name has moved on.
+// id, so the name is the only link across attempts, and jobs can share one,
+// so the rerun counts as started only once every job of that name has moved on.
 func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (int, error) {
 	const perPage = 100
 	earliest := 0

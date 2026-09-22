@@ -529,9 +529,7 @@ var (
 	runnerIsBusy = runnerBusy
 )
 
-// rerunAttempts caps automatic reruns after preemption. run_attempt counts
-// every attempt of the run, including manual reruns, so the cap holds however
-// the earlier attempts were started.
+// rerunAttempts caps reruns after preemption, counting manual attempts too.
 const rerunAttempts = 3
 
 func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
@@ -561,12 +559,9 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	return deleteVM(ctx, instanceName)
 }
 
-// rerunIfPreempted re-queues a failed job whose spot VM Compute Engine took
-// away while the job was running. Preemption deletes the VM outright, so the
-// only trace is the preempted operation on the instance; a real failure never
-// produces one. The rerun gets a new job id and a new VM through the queued
-// path. A rerun GitHub refuses because the job is already queued counts as
-// done, so a Cloud Tasks retry of this task cannot rerun it twice.
+// rerunIfPreempted re-queues a failed job whose spot VM was preempted while
+// the job ran. Preemption deletes the VM outright, so the preempted operation
+// on the instance is the only trace, and a real failure never produces one.
 func rerunIfPreempted(ctx context.Context, event WorkflowJobEvent, instanceName string) error {
 	job := event.WorkflowJob
 	preempted, err := instancePreempted(ctx, instanceName, job.StartedAt, job.CompletedAt)
