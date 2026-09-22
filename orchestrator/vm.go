@@ -461,6 +461,49 @@ func findInstanceZone(ctx context.Context, name string) (string, error) {
 	}
 }
 
+const preemptedOperation = "compute.instances.preempted"
+
+// instancePreempted reports whether Compute Engine preempted this VM between
+// the two times. The VM is gone by the time anyone asks, so its zone is
+// unknown and the operations are searched across the whole project. The
+// window keeps a preemption of an idle VM, after its job had already finished,
+// from passing off a real failure as one.
+func instancePreempted(ctx context.Context, name string, from, until time.Time) (bool, error) {
+	client, err := compute.NewGlobalOperationsRESTClient(ctx)
+	if err != nil {
+		return false, fmt.Errorf("create compute client: %w", err)
+	}
+	defer client.Close()
+
+	filter := fmt.Sprintf("operationType = %q AND targetLink ~ \"/instances/%s$\"", preemptedOperation, name)
+	it := client.AggregatedList(ctx, &computepb.AggregatedListGlobalOperationsRequest{
+		Project:              os.Getenv("GCP_PROJECT"),
+		Filter:               proto.String(filter),
+		ReturnPartialSuccess: proto.Bool(true),
+	})
+	for {
+		scope, err := it.Next()
+		if err == iterator.Done {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("list operations for VM %s: %w", name, err)
+		}
+		for _, operation := range scope.Value.GetOperations() {
+			if path.Base(operation.GetTargetLink()) != name {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, operation.GetInsertTime())
+			if err != nil {
+				return false, fmt.Errorf("parse preemption time %q: %w", operation.GetInsertTime(), err)
+			}
+			if !at.Before(from) && !at.After(until) {
+				return true, nil
+			}
+		}
+	}
+}
+
 func deleteRunnerVM(ctx context.Context, name string) error {
 	zone, err := findInstanceZone(ctx, name)
 	if err != nil {

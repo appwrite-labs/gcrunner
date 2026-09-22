@@ -119,7 +119,7 @@ runs-on: gcrunner=${{ github.run_id }}/machine=n2-standard-2/spot=false
 
 1. By default, all VMs are Spot (`spot=true`). GCP Spot VMs are 60–91% cheaper than on-demand.
 2. If GCP cannot fulfill the Spot request (capacity error), gcrunner automatically retries the same machine type as on-demand.
-3. If a running Spot VM gets preempted mid-job, GCP gives a 30-second warning. The runner agent catches SIGTERM and the job fails. The user can re-run manually.
+3. If a running Spot VM gets preempted mid-job, the job fails. gcrunner detects the preemption from the Compute Engine operation on the instance and re-runs the job, up to three attempts in total.
 4. Zone selection: try each zone in the configured region sequentially until one succeeds.
 
 **Built-in images (MVP):**
@@ -141,7 +141,6 @@ These labels are deferred to post-MVP to keep the initial implementation simple.
 | `disk-type` | Disk type: `pd-balanced`, `pd-ssd`, `pd-standard`. |
 | `local-ssd` | Attach local SSDs for scratch space. |
 | `spot-fallback` | Explicit control over fallback behavior (vs MVP's always-fallback). |
-| `retry` | Auto-retry on spot preemption (`when-preempted`). |
 | `max-price` | Budget guardrail — max hourly price. |
 | `zone` | Pin to specific zone(s). |
 | `timeout` | Max job runtime in minutes. |
@@ -224,7 +223,6 @@ Multiple layers prevent orphaned VMs:
 - Multi-family selection (`machine=n2+c3`)
 - ARM runners (`t2a` + `ubuntu24-full-arm64`)
 - Custom runner definitions (`.github/gcrunner.yml`)
-- Spot preemption retry (`retry=when-preempted`)
 - `max-price` budget guardrails
 - `debug` mode with SSH
 - Windows runners

@@ -255,6 +255,10 @@ func fetchRepositoryContents(ctx context.Context, owner, repo, path, ref string)
 	return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
 }
 
+// notAccessible is how GitHub words a 403 for a permission the App
+// installation lacks, as opposed to a 403 for a request that no longer applies.
+const notAccessible = "Resource not accessible by integration"
+
 // githubError is a non-2xx answer from the GitHub API.
 type githubError struct {
 	Status int
@@ -353,4 +357,36 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	}
 	log.Printf("Removed stale runner registration %s", name)
 	return nil
+}
+
+// rerunWorkflowJob re-queues a job and its dependents. GitHub answers 403
+// when the job is already queued or running, which means an earlier call
+// already did the work, so that counts as success. A 403 for a missing
+// permission is kept as an error: the App needs actions: write for this.
+func rerunWorkflowJob(ctx context.Context, owner, repo string, jobID int64) error {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, jobID)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := githubClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusForbidden && !strings.Contains(string(respBody), notAccessible) {
+		log.Printf("Job %d: rerun already requested: %s", jobID, string(respBody))
+		return nil
+	}
+	return &githubError{Status: resp.StatusCode, Body: string(respBody)}
 }

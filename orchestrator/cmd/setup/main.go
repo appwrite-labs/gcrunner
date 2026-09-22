@@ -48,7 +48,7 @@ func main() {
 		RedirectURL: redirectURL,
 		Public:      false,
 		DefaultPermissions: map[string]string{
-			"actions":        "read",
+			"actions":        "write",
 			"administration": "write",
 			"contents":       "read",
 		},

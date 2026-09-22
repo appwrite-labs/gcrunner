@@ -527,7 +527,14 @@ func resolveJob(ctx context.Context, event WorkflowJobEvent, job *JobLabels) (*R
 var (
 	deleteVM     = deleteRunnerVM
 	runnerIsBusy = runnerBusy
+	vmPreempted  = instancePreempted
+	rerunJob     = rerunWorkflowJob
 )
+
+// rerunAttempts caps automatic reruns after preemption. run_attempt counts
+// every attempt of the run, including manual reruns, so the cap holds however
+// the earlier attempts were started.
+const rerunAttempts = 3
 
 func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	if parseJobLabels(event.WorkflowJob.Labels) == nil {
@@ -535,6 +542,11 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	}
 
 	instanceName, ranHere := deletionTarget(event)
+	if ranHere && event.WorkflowJob.Conclusion == conclusionFailure {
+		if err := rerunIfPreempted(ctx, event, instanceName); err != nil {
+			return err
+		}
+	}
 	if !ranHere {
 		// The job never reached a runner. Its own VM may meanwhile have picked
 		// up another job with the same labels, so only delete it when idle.
@@ -549,6 +561,33 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
 	return deleteVM(ctx, instanceName)
+}
+
+// rerunIfPreempted re-queues a failed job whose spot VM Compute Engine took
+// away while the job was running. Preemption deletes the VM outright, so the
+// only trace is the preempted operation on the instance; a real failure never
+// produces one. The rerun gets a new job id and a new VM through the queued
+// path. A rerun GitHub refuses because the job is already queued counts as
+// done, so a Cloud Tasks retry of this task cannot rerun it twice.
+func rerunIfPreempted(ctx context.Context, event WorkflowJobEvent, instanceName string) error {
+	job := event.WorkflowJob
+	preempted, err := vmPreempted(ctx, instanceName, job.StartedAt, job.CompletedAt)
+	if err != nil {
+		return fmt.Errorf("check preemption of %s: %w", instanceName, err)
+	}
+	if !preempted {
+		return nil
+	}
+	ran := job.CompletedAt.Sub(job.StartedAt).Round(time.Second)
+	if job.RunAttempt >= rerunAttempts {
+		log.Printf("Job %d: preempted after %s on attempt %d, not rerunning past attempt %d", job.ID, ran, job.RunAttempt, rerunAttempts)
+		return nil
+	}
+	log.Printf("Job %d: preempted after %s, rerunning (attempt %d)", job.ID, ran, job.RunAttempt+1)
+	if err := rerunJob(ctx, event.Repository.Owner.Login, event.Repository.Name, job.ID); err != nil {
+		return fmt.Errorf("rerun job %d: %w", job.ID, err)
+	}
+	return nil
 }
 
 // deletionTarget names the VM to delete for a completed job. GitHub hands a
@@ -588,6 +627,7 @@ type WorkflowJob struct {
 	RunID        int64     `json:"run_id"`
 	HeadSHA      string    `json:"head_sha"`
 	Labels       []string  `json:"labels"`
+	RunAttempt   int       `json:"run_attempt"`
 	RunnerName   string    `json:"runner_name"`
 	WorkflowName string    `json:"workflow_name"`
 	Conclusion   string    `json:"conclusion"`
@@ -595,6 +635,8 @@ type WorkflowJob struct {
 	StartedAt    time.Time `json:"started_at"`
 	CompletedAt  time.Time `json:"completed_at"`
 }
+
+const conclusionFailure = "failure"
 
 type Repository struct {
 	FullName      string          `json:"full_name"`
