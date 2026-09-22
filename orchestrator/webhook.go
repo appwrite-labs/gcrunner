@@ -545,13 +545,8 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	deferred := false
 	if ranHere && event.WorkflowJob.Conclusion == conclusionFailure {
 		err := rerunIfPreempted(ctx, event, instanceName)
-		switch {
-		case errors.Is(err, errRunBusy):
-			if err := deferRerun(ctx, event); err != nil {
-				return err
-			}
-			deferred = true
-		case err != nil:
+		deferred = errors.Is(err, errRunBusy)
+		if err != nil && !deferred {
 			return err
 		}
 	}
@@ -571,10 +566,14 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	if err := deleteVM(ctx, instanceName); err != nil {
 		return err
 	}
-	if deferred {
-		return errRunBusy
+	if !deferred {
+		return nil
 	}
-	return nil
+	// Scheduled last so a failure before it retries this task, not both.
+	if err := deferRerun(ctx, event); err != nil {
+		return err
+	}
+	return errRunBusy
 }
 
 // rerunDelay is how long a preempted job waits between looks at whether its

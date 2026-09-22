@@ -91,14 +91,32 @@ func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 
 // scheduled records the tasks the handler scheduled for later.
 type scheduled struct {
-	names []string
-	at    []time.Time
+	bodies [][]byte
+	at     []time.Time
 }
 
 // failedJob delivers the completed task for a failed job "build" of run 7
 // that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks
 // along with the tasks it scheduled.
 func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
+	t.Helper()
+	body, err := json.Marshal(WorkflowJobEvent{
+		Action: "completed",
+		WorkflowJob: WorkflowJob{
+			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
+			Conclusion: "failure", StartedAt: jobStart, CompletedAt: jobEnd,
+		},
+		Repository: Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return deliver(t, body, gh, preemptedAt...)
+}
+
+// deliver hands a completed task with the given body to the handler against
+// the GitHub stand-in and the given preemptions of gcrunner-7-42.
+func deliver(t *testing.T, body []byte, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
 	t.Helper()
 	t.Setenv("GCP_PROJECT", "p")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -111,37 +129,22 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 	t.Cleanup(func() {
 		loadSecret, githubClient.Transport, computeOptions, deleteVM, schedule = originalSecret, originalTransport, originalOptions, originalDelete, originalSchedule
 	})
-	later := &scheduled{}
-	schedule = func(_ context.Context, path string, body []byte, name string, at time.Time) error {
-		if path != "/task/completed" {
-			t.Errorf("scheduled %s, want /task/completed", path)
-		}
-		var event WorkflowJobEvent
-		if err := json.Unmarshal(body, &event); err != nil || event.WorkflowJob.ID != 42 {
-			t.Errorf("scheduled body %s is not the job's completed event", body)
-		}
-		later.names = append(later.names, name)
-		later.at = append(later.at, at)
-		return nil
-	}
 	loadSecret = func(_ context.Context, name string) (string, error) {
 		return map[string]string{"gcrunner-app-id": "1", "gcrunner-private-key": keyPEM}[name], nil
 	}
 	githubClient.Transport = gh
 	computeOptions = []option.ClientOption{option.WithEndpoint(operations(t, preemptedAt...).URL), option.WithoutAuthentication()}
 	deleteVM = func(context.Context, string) error { return nil }
-
-	body, err := json.Marshal(WorkflowJobEvent{
-		Action: "completed",
-		WorkflowJob: WorkflowJob{
-			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
-			Conclusion: "failure", StartedAt: jobStart, CompletedAt: jobEnd,
-		},
-		Repository: Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
-	})
-	if err != nil {
-		t.Fatal(err)
+	later := &scheduled{}
+	schedule = func(_ context.Context, path string, body []byte, _ string, at time.Time) error {
+		if path != "/task/completed" {
+			t.Errorf("scheduled %s, want /task/completed", path)
+		}
+		later.bodies = append(later.bodies, body)
+		later.at = append(later.at, at)
+		return nil
 	}
+
 	request := httptest.NewRequest(http.MethodPost, "/task/completed", strings.NewReader(string(body)))
 	request.Header.Set("X-CloudTasks-TaskName", "task-42")
 	response := httptest.NewRecorder()
@@ -194,38 +197,34 @@ func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 }
 
 // GitHub refuses to rerun a job while any job of its run is still going, so
-// asking would only fail. A busy run is looked at again later from a task
-// scheduled for then, not a retry, and the rerun goes out once the run has
-// completed.
+// asking would only fail. A busy run is looked at again from one task
+// scheduled for later, not a retry, and that task sends the rerun once the
+// run has completed.
 func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
-	for name, c := range map[string]struct {
-		runStatus string
-		reruns    int
-		deferrals int
-	}{
-		"run queued":      {"queued", 0, 1},
-		"run in progress": {"in_progress", 0, 1},
-		"run completed":   {"completed", 1, 0},
-	} {
-		gh := &github{runStatus: c.runStatus, rerunStatus: http.StatusCreated}
-		before := time.Now()
-		code, later := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+	during := jobStart.Add(5 * time.Minute)
+	for _, status := range []string{"queued", "in_progress"} {
+		gh := &github{runStatus: status, rerunStatus: http.StatusCreated}
+		code, later := failedJob(t, 1, gh, during)
 		if code != http.StatusOK {
-			t.Errorf("%s: status %d, want 200", name, code)
+			t.Errorf("run %s: status %d, want 200", status, code)
 		}
-		if gh.reruns != c.reruns {
-			t.Errorf("%s: %d reruns, want %d", name, gh.reruns, c.reruns)
+		if gh.reruns != 0 {
+			t.Errorf("run %s: %d reruns, want none yet", status, gh.reruns)
 		}
-		if len(later.names) != c.deferrals {
-			t.Errorf("%s: %d tasks scheduled, want %d", name, len(later.names), c.deferrals)
+		if len(later.bodies) != 1 {
+			t.Fatalf("run %s: %d tasks scheduled, want 1", status, len(later.bodies))
 		}
-		for i, at := range later.at {
-			if due := at.Sub(before); due < rerunDelay || due > rerunDelay+time.Minute {
-				t.Errorf("%s: task due in %s, want about %s", name, due, rerunDelay)
-			}
-			if want := fmt.Sprintf("job-42-rerun-%d", at.Unix()); later.names[i] != want {
-				t.Errorf("%s: task named %s, want %s", name, later.names[i], want)
-			}
+		if !later.at[0].After(time.Now()) {
+			t.Errorf("run %s: task due at %s, want later", status, later.at[0])
+		}
+
+		gh.runStatus = "completed"
+		code, again := deliver(t, later.bodies[0], gh, during)
+		if code != http.StatusOK {
+			t.Errorf("run %s then completed: status %d, want 200", status, code)
+		}
+		if gh.reruns != 1 || len(again.bodies) != 0 {
+			t.Errorf("run %s then completed: %d reruns and %d tasks scheduled, want 1 and 0", status, gh.reruns, len(again.bodies))
 		}
 	}
 }
@@ -239,8 +238,8 @@ func TestARerunThatAlreadyTookIsNotWaitedOn(t *testing.T) {
 	if code != http.StatusOK {
 		t.Errorf("status %d, want 200", code)
 	}
-	if gh.reruns != 0 || len(later.names) != 0 {
-		t.Errorf("%d reruns and %d scheduled tasks, want none", gh.reruns, len(later.names))
+	if gh.reruns != 0 || len(later.bodies) != 0 {
+		t.Errorf("%d reruns and %d scheduled tasks, want none", gh.reruns, len(later.bodies))
 	}
 }
 
