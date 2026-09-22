@@ -366,7 +366,7 @@ func lifetime(timeout string) time.Duration {
 	if err != nil || duration <= 0 {
 		duration = defaultTimeout
 	}
-	return min(duration+bootAllowance, longestTimeout)
+	return min(duration, longestTimeout) + bootAllowance
 }
 
 // scheduling caps every VM's lifetime so Compute Engine deletes it when the

@@ -243,7 +243,8 @@ func TestEveryVMIsDeletedWhenItsLifetimeCapPasses(t *testing.T) {
 		{name: "GitHub's default timeout", label: "gcrunner=test", spot: true, jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
 		{name: "on-demand", label: "gcrunner=test/spot=false", jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
 		{name: "a job that raised timeout-minutes", label: "gcrunner=test/timeout=90m", spot: true, jobTimeout: 90 * time.Minute, wantCapWithin: time.Hour},
-		{name: "past GitHub's five-day limit", label: "gcrunner=test/timeout=200h", spot: true, jobTimeout: 5 * day, wantCapWithin: 0},
+		{name: "past GitHub's five-day limit", label: "gcrunner=test/timeout=200h", spot: true, jobTimeout: 5 * day, wantCapWithin: time.Hour},
+		{name: "the longest duration Go can hold", label: "gcrunner=test/timeout=2562047h47m", spot: true, jobTimeout: 5 * day, wantCapWithin: time.Hour},
 		{name: "unparseable", label: "gcrunner=test/timeout=soon", spot: true, jobTimeout: 6 * time.Hour, wantCapWithin: time.Hour},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
