@@ -60,6 +60,27 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	}
 }
 
+// A runner that exits without taking its job leaves nothing behind once the
+// VM has deleted itself, except the serial console if Compute Engine was told
+// to keep it in Cloud Logging.
+func TestVMKeepsItsSerialConsoleInCloudLogging(t *testing.T) {
+	t.Setenv("GCRUNNER_ZONES", "europe-west1-b")
+	t.Setenv("GCE_REGION", "europe-west1")
+	zoneOffset.Store(0)
+	var created *computepb.Instance
+	withInsert(t, func(_ context.Context, _ string, instance *computepb.Instance) error {
+		created = instance
+		return nil
+	})
+	labels := &RunnerLabels{Machine: "n2-standard-2", MachineMode: "exact"}
+	if err := createRunnerInstance(context.Background(), labels, "vm", "jit", "owner", "repo"); err != nil {
+		t.Fatalf("createRunnerInstance: %v", err)
+	}
+	if got := metadataItem(created, "serial-port-logging-enable"); got != "true" {
+		t.Errorf("serial-port-logging-enable = %q, want true", got)
+	}
+}
+
 // metadataItem is what the VM will read for this key from its metadata server.
 func metadataItem(instance *computepb.Instance, key string) string {
 	for _, item := range instance.GetMetadata().GetItems() {
