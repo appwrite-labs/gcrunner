@@ -191,7 +191,7 @@ Multiple layers prevent orphaned VMs:
 - **Minimal IAM**: Cloud Function service account has only `compute.instanceAdmin.v1` on the runner subnet, `iam.serviceAccountUser` on the runner SA. Runner SA has only GCS access (cache bucket) and `compute.instances.delete` on itself.
 - **Ephemeral runners**: Every VM handles exactly one job. No shared state between jobs. No persistent disk reuse.
 - **No ingress**: Runner VMs have no public IP by default (configurable). All communication is outbound to GitHub and GCS.
-- **GitHub App scoping**: The GitHub App only needs `actions:write` (to re-run preempted jobs) and `administration:write` (for runner registration). No code access.
+- **GitHub App scoping**: The GitHub App only needs `actions:write` (to re-run preempted jobs and cancel runs that can never start), `checks:write` (to report why) and `administration:write` (for runner registration). No code access.
 - **Secrets in Secret Manager**: GitHub App private key and webhook secret stored in Secret Manager, not in Terraform state.
 
 ---

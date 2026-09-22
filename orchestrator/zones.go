@@ -31,6 +31,9 @@ var zoneCache = &ZoneCache{
 	nowFunc: time.Now,
 }
 
+// Indirected so tests can decide whether discovery answers.
+var listZones = fetchZones
+
 // ListZones returns the available (UP) zones for a region, using a cache.
 func ListZones(ctx context.Context, project, region string) ([]string, error) {
 	return zoneCache.list(ctx, project, region)
@@ -47,7 +50,7 @@ func (c *ZoneCache) list(ctx context.Context, project, region string) ([]string,
 		return entry.zones, nil
 	}
 
-	zones, err := fetchZones(ctx, project, region)
+	zones, err := listZones(ctx, project, region)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package function
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -432,4 +433,60 @@ func githubRequest(ctx context.Context, method, endpoint, installationToken stri
 	req.Header.Set("Authorization", "Bearer "+installationToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	return githubClient.Do(req)
+}
+
+// failRun reports a job that can never start: a failed check on its commit
+// carrying the reason, then a cancel of the run so it does not wait a day.
+func failRun(ctx context.Context, owner, repo string, job WorkflowJob, reason error) error {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	check, err := json.Marshal(map[string]any{
+		"name":       "gcrunner",
+		"head_sha":   job.HeadSHA,
+		"status":     "completed",
+		"conclusion": "failure",
+		"output": map[string]string{
+			"title":   job.Name + " cannot start",
+			"summary": reason.Error() + ". Fix " + configPath + " or the runs-on label and re-run the workflow.",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/check-runs", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(check))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := githubClient.Do(req)
+	if err := answered(resp, err, http.StatusCreated); err != nil {
+		return fmt.Errorf("create check run: %w", err)
+	}
+	endpoint = fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/cancel", owner, repo, job.RunID)
+	resp, err = githubRequest(ctx, "POST", endpoint, installationToken)
+	if err := answered(resp, err, http.StatusAccepted, http.StatusConflict); err != nil {
+		return fmt.Errorf("cancel run %d: %w", job.RunID, err)
+	}
+	return nil
+}
+
+// answered closes the response and returns a githubError unless its status is
+// one of those given.
+func answered(resp *http.Response, err error, statuses ...int) error {
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	for _, status := range statuses {
+		if resp.StatusCode == status {
+			return nil
+		}
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	return &githubError{Status: resp.StatusCode, Body: string(respBody)}
 }

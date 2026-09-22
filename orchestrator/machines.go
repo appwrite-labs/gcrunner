@@ -2,6 +2,7 @@ package function
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,6 +36,11 @@ type machineTypeCacheEntry struct {
 	fetchedAt time.Time
 }
 
+var errNoMachineType = errors.New("no machine type matching constraints")
+
+// Indirected so tests can supply a zone's catalogue without Compute.
+var listMachineTypes = fetchMachineTypes
+
 var machineTypeCache = &MachineTypeCache{
 	types:   make(map[string]machineTypeCacheEntry),
 	ttl:     1 * time.Hour,
@@ -57,7 +63,7 @@ func (c *MachineTypeCache) list(ctx context.Context, project, zone string) ([]*M
 		return entry.types, nil
 	}
 
-	types, err := fetchMachineTypes(ctx, project, zone)
+	types, err := listMachineTypes(ctx, project, zone)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +163,7 @@ func ResolveMachineType(ctx context.Context, project, zone string, labels *Runne
 	}
 
 	if best == nil {
-		return "", fmt.Errorf("no machine type matching constraints (families=%v, cpu=%s, ram=%s) in zone %s",
-			families, labels.CPU, labels.RAM, zone)
+		return "", fmt.Errorf("%w (families=%v, cpu=%s, ram=%s) in zone %s", errNoMachineType, families, labels.CPU, labels.RAM, zone)
 	}
 
 	return best.Name, nil
