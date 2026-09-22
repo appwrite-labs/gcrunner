@@ -379,9 +379,7 @@ func runnerInstance(name, zone, machineType string, labels *RunnerLabels, startu
 					Value: proto.String(jitConfig),
 				},
 				{
-					// Off by default. The VM deletes itself when the runner
-					// exits, so the serial console in Cloud Logging is the
-					// only record of a runner that died without taking its job.
+					// Off by default; the only record left once the VM deletes itself.
 					Key:   proto.String("serial-port-logging-enable"),
 					Value: proto.String("true"),
 				},

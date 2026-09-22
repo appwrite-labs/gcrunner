@@ -60,9 +60,6 @@ func startVM(t *testing.T, zones string, fail map[string]error, home string) {
 	}
 }
 
-// A runner that exits without taking its job leaves nothing behind once the
-// VM has deleted itself, except the serial console if Compute Engine was told
-// to keep it in Cloud Logging.
 func TestVMKeepsItsSerialConsoleInCloudLogging(t *testing.T) {
 	t.Setenv("GCRUNNER_ZONES", "europe-west1-b")
 	t.Setenv("GCE_REGION", "europe-west1")
