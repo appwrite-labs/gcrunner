@@ -356,16 +356,13 @@ func removeIdleRunner(ctx context.Context, owner, repo, name string) error {
 	return nil
 }
 
-// errRunBusy means the run still has jobs going, so GitHub would refuse the
-// rerun; the check is repeated later, once the run is done.
 var errRunBusy = errors.New("run still in progress")
 
 // rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
-// run. A rerun that already took, shown by this job being on a later attempt,
-// is done, whether an earlier delivery of the task or a person started it. A
-// busy run is waited out rather than asked, since GitHub refuses the rerun
-// while any job of the run is going. GitHub also refuses when the App lacks
-// actions: write; that and anything else is an error so the task comes back.
+// run. GitHub refuses a rerun while the run is busy, when an earlier call
+// already started it, and when the App lacks actions: write. Only a rerun
+// that took is done, shown by this job being on a later attempt; anything
+// else is an error so the task comes back later.
 func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
@@ -397,7 +394,6 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
-	// The run may have completed and been rerun between the two calls.
 	attempt, err = latestAttempt(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return errors.Join(refused, err)
@@ -409,8 +405,7 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	return refused
 }
 
-// runCompleted reports whether every job of the run has finished. GitHub only
-// reruns a job of a run whose status is completed.
+// runCompleted reports whether every job of the run has finished.
 func runCompleted(ctx context.Context, owner, repo string, runID int64, installationToken string) (bool, error) {
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d", owner, repo, runID)
 	resp, err := githubRequest(ctx, "GET", endpoint, installationToken)

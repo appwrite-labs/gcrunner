@@ -483,9 +483,6 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 		// only holds a queue slot. The job stays queued on GitHub either way.
 		log.Printf("Job %d: %v, not retrying", payload.WorkflowJob.ID, err)
 		recordTask(ctx, task, retryCount, taskOutcomePermanent)
-	case errors.Is(err, errRunBusy):
-		// The rerun is waiting on the run; a scheduled task carries it on.
-		recordTask(ctx, task, retryCount, taskOutcomeDeferred)
 	default:
 		log.Printf("ERROR handling %s task: %v", task, err)
 		recordTask(ctx, task, retryCount, taskOutcomeError)
@@ -572,41 +569,28 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 		}
 	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
-	if err := deleteVM(ctx, instanceName); err != nil {
+	if err := deleteVM(ctx, instanceName); err != nil || !deferred {
 		return err
 	}
-	if !deferred {
-		return nil
-	}
-	// Scheduled last so a failure before it retries this task, not both.
 	return deferRerun(ctx, event)
 }
 
-// rerunPath takes the rerun of a preempted job whose run was still going.
-// The preemption and the VM were settled by the completed task, so only the
-// rerun is left to do.
-const rerunPath = "/task/rerun"
+const (
+	rerunPath  = "/task/rerun"
+	rerunDelay = 5 * time.Minute
+)
 
+// handleRerun reruns a preempted job once the rest of its run has finished.
 func handleRerun(ctx context.Context, event WorkflowJobEvent) error {
-	job := event.WorkflowJob
-	err := rerunWorkflowJob(ctx, event.Repository.Owner.Login, event.Repository.Name, job)
+	err := rerunWorkflowJob(ctx, event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob)
 	if errors.Is(err, errRunBusy) {
 		return deferRerun(ctx, event)
 	}
-	if err != nil {
-		return fmt.Errorf("rerun job %d: %w", job.ID, err)
-	}
-	return nil
+	return err
 }
 
-// rerunDelay is how long a preempted job waits between looks at whether its
-// run has completed.
-const rerunDelay = 5 * time.Minute
-
-// deferRerun schedules the rerun task for later, as its own task rather than
-// a retry, so the wait costs no retry budget and lasts as long as the run
-// does. It returns errRunBusy once scheduled. The task name carries the due
-// time, since Cloud Tasks refuses to reuse a name for hours after it ran.
+// deferRerun schedules handleRerun for later. Cloud Tasks will not reuse a task
+// name for hours, so the name carries the due time.
 func deferRerun(ctx context.Context, event WorkflowJobEvent) error {
 	body, err := json.Marshal(event)
 	if err != nil {
@@ -618,7 +602,7 @@ func deferRerun(ctx context.Context, event WorkflowJobEvent) error {
 		return fmt.Errorf("defer rerun of job %d: %w", event.WorkflowJob.ID, err)
 	}
 	log.Printf("Job %d: run still in progress, checking again in %s", event.WorkflowJob.ID, rerunDelay)
-	return errRunBusy
+	return nil
 }
 
 // rerunIfPreempted re-queues a failed job whose spot VM was preempted while

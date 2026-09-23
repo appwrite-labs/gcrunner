@@ -51,7 +51,7 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		if status == "" {
 			status = "completed"
 		}
-		return answer(http.StatusOK, fmt.Sprintf(`{"id": 7, "status": %q}`, status))
+		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, status))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
 		g.reruns++
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
@@ -106,13 +106,6 @@ func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 	return server
 }
 
-// scheduled records the tasks the handler scheduled for later.
-type scheduled struct {
-	paths  []string
-	bodies [][]byte
-	at     []time.Time
-}
-
 // useGitHub puts gh behind githubClient with App credentials that sign.
 func useGitHub(t *testing.T, gh *github) {
 	t.Helper()
@@ -137,13 +130,6 @@ func deliverTask(t *testing.T, path string, event WorkflowJobEvent) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return deliverBody(t, path, body)
-}
-
-// deliverBody posts a task body as Cloud Tasks does, so a scheduled task's
-// body can be delivered as is, and reports the status handed back.
-func deliverBody(t *testing.T, path string, body []byte) int {
-	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
 	request.Header.Set("X-CloudTasks-TaskName", "task-42")
 	response := httptest.NewRecorder()
@@ -152,11 +138,17 @@ func deliverBody(t *testing.T, path string, body []byte) int {
 }
 
 // failedJob delivers the completed task for a failed job "build" of run 7
-// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks
-// along with the tasks it scheduled.
-func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
+// that ran on gcrunner-7-42 and reports the status handed to Cloud Tasks.
+func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) int {
 	t.Helper()
-	body, err := json.Marshal(WorkflowJobEvent{
+	t.Setenv("GCP_PROJECT", "p")
+	useGitHub(t, gh)
+	originalOptions, originalDelete := computeOptions, deleteVM
+	t.Cleanup(func() { computeOptions, deleteVM = originalOptions, originalDelete })
+	computeOptions = []option.ClientOption{option.WithEndpoint(operations(t, preemptedAt...).URL), option.WithoutAuthentication()}
+	deleteVM = func(context.Context, string) error { return nil }
+
+	return deliverTask(t, "/task/completed", WorkflowJobEvent{
 		Action: "completed",
 		WorkflowJob: WorkflowJob{
 			ID: 42, Name: "build", RunID: 7, RunAttempt: attempt, RunnerName: "gcrunner-7-42", Labels: gcrunnerLabels,
@@ -164,30 +156,6 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 		},
 		Repository: cloudRepository,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return deliver(t, "/task/completed", body, gh, preemptedAt...)
-}
-
-// deliver hands a task with the given path and body to the handler against
-// the GitHub stand-in and the given preemptions of gcrunner-7-42.
-func deliver(t *testing.T, path string, body []byte, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
-	t.Helper()
-	t.Setenv("GCP_PROJECT", "p")
-	useGitHub(t, gh)
-	originalOptions, originalDelete, originalSchedule := computeOptions, deleteVM, schedule
-	t.Cleanup(func() { computeOptions, deleteVM, schedule = originalOptions, originalDelete, originalSchedule })
-	computeOptions = []option.ClientOption{option.WithEndpoint(operations(t, preemptedAt...).URL), option.WithoutAuthentication()}
-	deleteVM = func(context.Context, string) error { return nil }
-	later := &scheduled{}
-	schedule = func(_ context.Context, path string, body []byte, _ string, at time.Time) error {
-		later.paths = append(later.paths, path)
-		later.bodies = append(later.bodies, body)
-		later.at = append(later.at, at)
-		return nil
-	}
-	return deliverBody(t, path, body), later
 }
 
 var cloudRepository = Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
@@ -206,7 +174,7 @@ func TestOnlyAJobPreemptedWhileRunningIsRerun(t *testing.T) {
 		"preempted on the third attempt":  {3, []time.Time{during}, 0},
 	} {
 		gh := &github{rerunStatus: http.StatusCreated}
-		if code, _ := failedJob(t, c.attempt, gh, c.preemptedAt...); code != http.StatusOK {
+		if code := failedJob(t, c.attempt, gh, c.preemptedAt...); code != http.StatusOK {
 			t.Errorf("%s: status %d, want 200", name, code)
 		}
 		if gh.reruns != c.reruns {
@@ -230,65 +198,64 @@ func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 		"a namesake was rerun":      {map[string][]int{"build": {2, 1}}, http.StatusInternalServerError},
 	} {
 		gh := &github{rerunStatus: http.StatusForbidden, latest: c.latest}
-		if code, _ := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
+		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
 			t.Errorf("%s: status %d, want %d", name, code, c.code)
 		}
 	}
 }
 
-// GitHub refuses to rerun a job while any job of its run is still going, so
-// asking would only fail. A busy run is looked at again from one task
-// scheduled for later, not a retry, and that task sends the rerun once the
-// run has completed. The look again does not depend on the preemption record,
-// which Compute Engine may no longer hold by the time a long run finishes.
-func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
-	during := jobStart.Add(5 * time.Minute)
+type scheduledTask struct {
+	path  string
+	event WorkflowJobEvent
+	at    time.Time
+}
+
+// recordSchedule stubs schedule and returns the tasks it was handed.
+func recordSchedule(t *testing.T) *[]scheduledTask {
+	original := schedule
+	t.Cleanup(func() { schedule = original })
+	tasks := &[]scheduledTask{}
+	schedule = func(_ context.Context, path string, body []byte, _ string, at time.Time) error {
+		task := scheduledTask{path: path, at: at}
+		if err := json.Unmarshal(body, &task.event); err != nil {
+			t.Error(err)
+		}
+		*tasks = append(*tasks, task)
+		return nil
+	}
+	return tasks
+}
+
+func TestAPreemptedJobIsRerunOnceItsRunHasCompleted(t *testing.T) {
 	for _, status := range []string{"queued", "in_progress"} {
 		gh := &github{runStatus: status, rerunStatus: http.StatusCreated}
-		code, later := failedJob(t, 1, gh, during)
-		if code != http.StatusOK {
-			t.Errorf("run %s: status %d, want 200", status, code)
+		tasks := recordSchedule(t)
+		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK {
+			t.Fatalf("run %s: status %d, want 200", status, code)
 		}
-		if gh.reruns != 0 {
-			t.Errorf("run %s: %d reruns, want none yet", status, gh.reruns)
-		}
-		if len(later.bodies) != 1 {
-			t.Fatalf("run %s: %d tasks scheduled, want 1", status, len(later.bodies))
-		}
-		if !later.at[0].After(time.Now()) {
-			t.Errorf("run %s: task due at %s, want later", status, later.at[0])
+		if gh.reruns != 0 || len(*tasks) != 1 || !(*tasks)[0].at.After(time.Now()) {
+			t.Fatalf("run %s: %d reruns and %d tasks scheduled, want 0 and 1 for later", status, gh.reruns, len(*tasks))
 		}
 
-		code, again := deliver(t, later.paths[0], later.bodies[0], gh)
-		if code != http.StatusOK {
-			t.Errorf("run %s still: status %d, want 200", status, code)
-		}
-		if gh.reruns != 0 || len(again.bodies) != 1 {
-			t.Fatalf("run %s still: %d reruns and %d tasks scheduled, want 0 and 1", status, gh.reruns, len(again.bodies))
+		// The recheck must not depend on Compute Engine still holding the preemption.
+		computeOptions = []option.ClientOption{option.WithEndpoint(operations(t).URL), option.WithoutAuthentication()}
+		deliverTask(t, (*tasks)[0].path, (*tasks)[0].event)
+		if gh.reruns != 0 || len(*tasks) != 2 {
+			t.Fatalf("run %s still: %d reruns and %d tasks scheduled, want 0 and 2", status, gh.reruns, len(*tasks))
 		}
 
 		gh.runStatus = "completed"
-		code, again = deliver(t, again.paths[0], again.bodies[0], gh)
-		if code != http.StatusOK {
-			t.Errorf("run %s then completed: status %d, want 200", status, code)
-		}
-		if gh.reruns != 1 || len(again.bodies) != 0 {
-			t.Errorf("run %s then completed: %d reruns and %d tasks scheduled, want 1 and 0", status, gh.reruns, len(again.bodies))
+		if code := deliverTask(t, (*tasks)[1].path, (*tasks)[1].event); code != http.StatusOK || gh.reruns != 1 || len(*tasks) != 2 {
+			t.Errorf("run %s then completed: status %d, %d reruns and %d tasks scheduled, want 200, 1 and 2", status, code, gh.reruns, len(*tasks))
 		}
 	}
 }
 
-// A rerun makes the run busy again, so a redelivery of the task after the
-// rerun took must not mistake that for a run still to be waited on: the job
-// already being on a later attempt settles it first.
 func TestARerunThatAlreadyTookIsNotWaitedOn(t *testing.T) {
 	gh := &github{runStatus: "in_progress", rerunStatus: http.StatusCreated, latest: map[string][]int{"build": {2}}}
-	code, later := failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
-	if code != http.StatusOK {
-		t.Errorf("status %d, want 200", code)
-	}
-	if gh.reruns != 0 || len(later.bodies) != 0 {
-		t.Errorf("%d reruns and %d scheduled tasks, want none", gh.reruns, len(later.bodies))
+	tasks := recordSchedule(t)
+	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || gh.reruns != 0 || len(*tasks) != 0 {
+		t.Errorf("status %d, %d reruns and %d tasks scheduled, want 200 and none", code, gh.reruns, len(*tasks))
 	}
 }
 
