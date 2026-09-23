@@ -426,6 +426,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 var (
 	loadSecret = getSecret
 	enqueue    = enqueueTask
+	schedule   = scheduleTask
 )
 
 // HandleTask handles requests from Cloud Tasks at /task/* paths.
@@ -466,6 +467,8 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 		err = handleQueued(ctx, payload)
 	case "/task/completed":
 		err = handleCompleted(ctx, payload)
+	case rerunPath:
+		err = handleRerun(ctx, payload)
 	default:
 		http.Error(w, "unknown task path", http.StatusNotFound)
 		return
@@ -545,8 +548,11 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 	}
 
 	instanceName, ranHere := deletionTarget(event)
+	deferred := false
 	if ranHere && event.WorkflowJob.Conclusion == conclusionFailure {
-		if err := rerunIfPreempted(ctx, event, instanceName); err != nil {
+		err := rerunIfPreempted(ctx, event, instanceName)
+		deferred = errors.Is(err, errRunBusy)
+		if err != nil && !deferred {
 			return err
 		}
 	}
@@ -563,7 +569,40 @@ func handleCompleted(ctx context.Context, event WorkflowJobEvent) error {
 		}
 	}
 	log.Printf("Job %d: completed, deleting VM %s", event.WorkflowJob.ID, instanceName)
-	return deleteVM(ctx, instanceName)
+	if err := deleteVM(ctx, instanceName); err != nil || !deferred {
+		return err
+	}
+	return deferRerun(ctx, event)
+}
+
+const (
+	rerunPath  = "/task/rerun"
+	rerunDelay = 5 * time.Minute
+)
+
+// handleRerun reruns a preempted job once the rest of its run has finished.
+func handleRerun(ctx context.Context, event WorkflowJobEvent) error {
+	err := rerunWorkflowJob(ctx, event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob)
+	if errors.Is(err, errRunBusy) {
+		return deferRerun(ctx, event)
+	}
+	return err
+}
+
+// deferRerun schedules handleRerun for later. Cloud Tasks will not reuse a task
+// name for hours, so the name carries the due time.
+func deferRerun(ctx context.Context, event WorkflowJobEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode job %d: %w", event.WorkflowJob.ID, err)
+	}
+	at := time.Now().Add(rerunDelay)
+	name := fmt.Sprintf("job-%d-rerun-%d", event.WorkflowJob.ID, at.Unix())
+	if err := schedule(ctx, rerunPath, body, name, at); err != nil {
+		return fmt.Errorf("defer rerun of job %d: %w", event.WorkflowJob.ID, err)
+	}
+	log.Printf("Job %d: run still in progress, checking again in %s", event.WorkflowJob.ID, rerunDelay)
+	return nil
 }
 
 // rerunIfPreempted re-queues a failed job whose spot VM was preempted while
