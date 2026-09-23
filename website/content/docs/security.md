@@ -56,7 +56,7 @@ All sensitive credentials — the GitHub App ID, RSA private key, webhook secret
 
 **Attack vector:** An attacker calls the internal `/task/*` endpoints directly to manipulate job state.
 
-The `/task/queued` and `/task/completed` endpoints are only invoked by Cloud Tasks, not directly by GitHub. Cloud Tasks authenticates each request with an OIDC token signed by the `gcrunner-tasks` service account. The Cloud Run IAM policy enforces this — only that service account (and the unauthenticated `/webhook` path) is granted the `run.invoker` role.
+The `/task/queued`, `/task/completed` and `/task/rerun` endpoints are only invoked by Cloud Tasks, not directly by GitHub. Cloud Tasks authenticates each request with an OIDC token signed by the `gcrunner-tasks` service account. The Cloud Run IAM policy enforces this — only that service account (and the unauthenticated `/webhook` path) is granted the `run.invoker` role.
 
 Task names are derived from the job ID, which deduplicates retries and prevents a replayed webhook from provisioning multiple VMs for the same job.
 

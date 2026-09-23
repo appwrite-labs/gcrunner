@@ -108,6 +108,7 @@ func operations(t *testing.T, preemptedAt ...time.Time) *httptest.Server {
 
 // scheduled records the tasks the handler scheduled for later.
 type scheduled struct {
+	paths  []string
 	bodies [][]byte
 	at     []time.Time
 }
@@ -166,12 +167,12 @@ func failedJob(t *testing.T, attempt int, gh *github, preemptedAt ...time.Time) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return deliver(t, body, gh, preemptedAt...)
+	return deliver(t, "/task/completed", body, gh, preemptedAt...)
 }
 
-// deliver hands a completed task with the given body to the handler against
+// deliver hands a task with the given path and body to the handler against
 // the GitHub stand-in and the given preemptions of gcrunner-7-42.
-func deliver(t *testing.T, body []byte, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
+func deliver(t *testing.T, path string, body []byte, gh *github, preemptedAt ...time.Time) (int, *scheduled) {
 	t.Helper()
 	t.Setenv("GCP_PROJECT", "p")
 	useGitHub(t, gh)
@@ -181,14 +182,12 @@ func deliver(t *testing.T, body []byte, gh *github, preemptedAt ...time.Time) (i
 	deleteVM = func(context.Context, string) error { return nil }
 	later := &scheduled{}
 	schedule = func(_ context.Context, path string, body []byte, _ string, at time.Time) error {
-		if path != "/task/completed" {
-			t.Errorf("scheduled %s, want /task/completed", path)
-		}
+		later.paths = append(later.paths, path)
 		later.bodies = append(later.bodies, body)
 		later.at = append(later.at, at)
 		return nil
 	}
-	return deliverBody(t, "/task/completed", body), later
+	return deliverBody(t, path, body), later
 }
 
 var cloudRepository = Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
@@ -240,7 +239,8 @@ func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 // GitHub refuses to rerun a job while any job of its run is still going, so
 // asking would only fail. A busy run is looked at again from one task
 // scheduled for later, not a retry, and that task sends the rerun once the
-// run has completed.
+// run has completed. The look again does not depend on the preemption record,
+// which Compute Engine may no longer hold by the time a long run finishes.
 func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
 	during := jobStart.Add(5 * time.Minute)
 	for _, status := range []string{"queued", "in_progress"} {
@@ -259,8 +259,16 @@ func TestAPreemptedJobIsRerunOnlyOnceItsRunHasCompleted(t *testing.T) {
 			t.Errorf("run %s: task due at %s, want later", status, later.at[0])
 		}
 
+		code, again := deliver(t, later.paths[0], later.bodies[0], gh)
+		if code != http.StatusOK {
+			t.Errorf("run %s still: status %d, want 200", status, code)
+		}
+		if gh.reruns != 0 || len(again.bodies) != 1 {
+			t.Fatalf("run %s still: %d reruns and %d tasks scheduled, want 0 and 1", status, gh.reruns, len(again.bodies))
+		}
+
 		gh.runStatus = "completed"
-		code, again := deliver(t, later.bodies[0], gh, during)
+		code, again = deliver(t, again.paths[0], again.bodies[0], gh)
 		if code != http.StatusOK {
 			t.Errorf("run %s then completed: status %d, want 200", status, code)
 		}

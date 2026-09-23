@@ -59,11 +59,12 @@ sequenceDiagram
 
 ### Cloud Run (orchestrator)
 
-The orchestrator is the only always-on component (though it scales to zero when idle). It handles three responsibilities:
+The orchestrator is the only always-on component (though it scales to zero when idle). It handles four responsibilities:
 
 - **`/webhook`** — Receives `workflow_job` events from GitHub, verifies the HMAC signature, and enqueues a Cloud Tasks task.
 - **`/task/queued`** — Provisions a new ephemeral VM for the job. Called by Cloud Tasks, authenticated with OIDC.
-- **`/task/completed`** — Force-deletes the VM as a safety net after job completion. Called by Cloud Tasks, authenticated with OIDC.
+- **`/task/completed`** — Force-deletes the VM as a safety net after job completion, and reruns a job whose spot VM was preempted. Called by Cloud Tasks, authenticated with OIDC.
+- **`/task/rerun`** — Reruns a preempted job once the rest of its workflow run has finished, since GitHub refuses a job rerun while the run is still going. Scheduled every five minutes by the orchestrator until then, authenticated with OIDC.
 
 Secrets (GitHub App credentials, webhook secret) are read from Secret Manager at runtime — never stored in environment variables or config files.
 
