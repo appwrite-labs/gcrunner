@@ -160,7 +160,7 @@ func TestAFailedCheckNeitherOverlapsTheNextNorRaisesTheCap(t *testing.T) {
 		runners int
 	}{
 		"scheduling the next check failed and is retried": {func(r *recovery) { r.failSchedule = 1 }, http.StatusInternalServerError, 4},
-		"creating the VM failed and is left to the next":   {func(r *recovery) { r.failProvision = 1 }, http.StatusOK, 3},
+		"creating the VM failed and is left to the next":  {func(r *recovery) { r.failProvision = 1 }, http.StatusOK, 3},
 	} {
 		r := newRecovery(t, deployConfig)
 		r.queue()

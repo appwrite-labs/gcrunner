@@ -376,12 +376,17 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
 		return nil
 	}
-	completed, err := runCompleted(ctx, owner, repo, job.RunID, installationToken)
+	run, err := fetchRun(ctx, owner, repo, job.RunID, installationToken)
 	if err != nil {
 		return err
 	}
-	if !completed {
+	if run.Status != runStatusCompleted {
 		return errRunBusy
+	}
+	// A newer push or a person cancelled the run; rerunning it would undo that.
+	if run.Conclusion == runConclusionCancelled {
+		log.Printf("Job %d: run %d was cancelled, not rerunning", job.ID, job.RunID)
+		return nil
 	}
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
 	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
@@ -405,28 +410,33 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	return refused
 }
 
-// runCompleted reports whether every job of the run has finished.
-func runCompleted(ctx context.Context, owner, repo string, runID int64, installationToken string) (bool, error) {
+type workflowRun struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+func fetchRun(ctx context.Context, owner, repo string, runID int64, installationToken string) (*workflowRun, error) {
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d", owner, repo, runID)
 	resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return false, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+		return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
 	}
-	var run struct {
-		Status string `json:"status"`
-	}
+	var run workflowRun
 	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
-		return false, fmt.Errorf("decode run %d: %w", runID, err)
+		return nil, fmt.Errorf("decode run %d: %w", runID, err)
 	}
-	return run.Status == runStatusCompleted, nil
+	return &run, nil
 }
 
-const runStatusCompleted = "completed"
+const (
+	runStatusCompleted     = "completed"
+	runConclusionCancelled = "cancelled"
+)
 
 const jobStatusQueued = "queued"
 
