@@ -63,6 +63,7 @@ The orchestrator is the only always-on component (though it scales to zero when 
 
 - **`/webhook`** — Receives `workflow_job` events from GitHub, verifies the HMAC signature, and enqueues a Cloud Tasks task.
 - **`/task/queued`** — Provisions a new ephemeral VM for the job. Called by Cloud Tasks, authenticated with OIDC.
+- **`/task/check`** — Scheduled 5 minutes after a VM is created. While the job is still queued, it checks again every 5 minutes, and if the job's VM is gone (runner dropped by GitHub, or spot VM preempted before the job started) it provisions a replacement, up to 3 times per job. Called by Cloud Tasks, authenticated with OIDC.
 - **`/task/completed`** — Force-deletes the VM as a safety net after job completion. Called by Cloud Tasks, authenticated with OIDC.
 
 Secrets (GitHub App credentials, webhook secret) are read from Secret Manager at runtime — never stored in environment variables or config files.
