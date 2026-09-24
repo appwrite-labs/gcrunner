@@ -24,11 +24,12 @@ var (
 )
 
 // github stands in for api.github.com: it reports the run as runStatus
-// (completed when empty), answers the rerun request with rerunStatus and the
-// check run with checkStatus, lists the run's latest jobs from latest (name
-// to attempts), and records what it was asked to do.
+// (completed when empty) and job 42 as jobStatus, answers the rerun request
+// with rerunStatus and the check run with checkStatus, lists the run's latest
+// jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
 	runStatus   string
+	jobStatus   string
 	rerunStatus int
 	checkStatus int
 	latest      map[string][]int
@@ -52,6 +53,8 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 			status = "completed"
 		}
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, status))
+	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42":
+		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, g.jobStatus))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
 		g.reruns++
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)

@@ -428,6 +428,33 @@ func runCompleted(ctx context.Context, owner, repo string, runID int64, installa
 
 const runStatusCompleted = "completed"
 
+const jobStatusQueued = "queued"
+
+// jobStatus returns the job's status as GitHub reports it.
+func jobStatus(ctx context.Context, owner, repo string, jobID int64) (string, error) {
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return "", fmt.Errorf("get installation token: %w", err)
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d", owner, repo, jobID)
+	resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", &githubError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	var job struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return "", fmt.Errorf("decode job %d: %w", jobID, err)
+	}
+	return job.Status, nil
+}
+
 // latestAttempt returns the earliest attempt among the run's latest jobs of
 // this job's name, or zero when there is none. A rerun gives the job a new
 // id, so the name is the only link across attempts, and jobs can share one,
