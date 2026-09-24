@@ -24,7 +24,8 @@ var (
 )
 
 // github stands in for api.github.com: it reports the run as runStatus
-// (completed when empty) with runConclusion and job 42 as jobStatus, answers the rerun request
+// (completed when empty) with runConclusion (failure when empty and
+// completed) and job 42 as jobStatus, answers the rerun request
 // with rerunStatus and the check run with checkStatus, lists the run's latest
 // jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
@@ -49,11 +50,14 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == "/app/installations/5/access_tokens":
 		return answer(http.StatusCreated, `{"token": "ghs_test"}`)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7":
-		status := g.runStatus
+		status, conclusion := g.runStatus, g.runConclusion
 		if status == "" {
 			status = "completed"
 		}
-		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q}`, status, g.runConclusion))
+		if status == "completed" && conclusion == "" {
+			conclusion = "failure"
+		}
+		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q}`, status, conclusion))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42":
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, g.jobStatus))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
