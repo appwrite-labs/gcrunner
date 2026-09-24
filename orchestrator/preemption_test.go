@@ -24,18 +24,20 @@ var (
 )
 
 // github stands in for api.github.com: it reports the run as runStatus
-// (completed when empty) and job 42 as jobStatus, answers the rerun request
+// (completed when empty) with runConclusion (failure when empty and
+// completed) and job 42 as jobStatus, answers the rerun request
 // with rerunStatus and the check run with checkStatus, lists the run's latest
 // jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
-	runStatus   string
-	jobStatus   string
-	rerunStatus int
-	checkStatus int
-	latest      map[string][]int
-	reruns      int
-	cancels     int
-	checks      []map[string]any
+	runStatus     string
+	runConclusion string
+	jobStatus     string
+	rerunStatus   int
+	checkStatus   int
+	latest        map[string][]int
+	reruns        int
+	cancels       int
+	checks        []map[string]any
 }
 
 func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,11 +50,14 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == "/app/installations/5/access_tokens":
 		return answer(http.StatusCreated, `{"token": "ghs_test"}`)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7":
-		status := g.runStatus
+		status, conclusion := g.runStatus, g.runConclusion
 		if status == "" {
 			status = "completed"
 		}
-		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, status))
+		if status == "completed" && conclusion == "" {
+			conclusion = "failure"
+		}
+		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q}`, status, conclusion))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42":
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, g.jobStatus))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
@@ -251,6 +256,23 @@ func TestAPreemptedJobIsRerunOnceItsRunHasCompleted(t *testing.T) {
 		if code := deliverTask(t, (*tasks)[1].path, (*tasks)[1].event); code != http.StatusOK || gh.reruns != 1 || len(*tasks) != 2 {
 			t.Errorf("run %s then completed: status %d, %d reruns and %d tasks scheduled, want 200, 1 and 2", status, code, gh.reruns, len(*tasks))
 		}
+	}
+}
+
+// A newer push cancels a superseded run through its concurrency group, and a
+// rerun of that run would cancel the newer one in turn.
+func TestACancelledRunIsNotRerun(t *testing.T) {
+	gh := &github{runConclusion: "cancelled", rerunStatus: http.StatusCreated}
+	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || gh.reruns != 0 {
+		t.Errorf("run cancelled when the job finished: status %d and %d reruns, want 200 and none", code, gh.reruns)
+	}
+
+	gh = &github{runStatus: "in_progress", rerunStatus: http.StatusCreated}
+	tasks := recordSchedule(t)
+	failedJob(t, 1, gh, jobStart.Add(5*time.Minute))
+	gh.runStatus, gh.runConclusion = "completed", "cancelled"
+	if code := deliverTask(t, (*tasks)[0].path, (*tasks)[0].event); code != http.StatusOK || gh.reruns != 0 || len(*tasks) != 1 {
+		t.Errorf("run cancelled while the rerun waited: status %d, %d reruns and %d tasks, want 200, none and 1", code, gh.reruns, len(*tasks))
 	}
 }
 
