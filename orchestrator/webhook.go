@@ -21,6 +21,8 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -470,8 +472,10 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 	case rerunPath:
 		err = handleRerun(ctx, payload)
 	case checkPath:
-		provisioned, _ := strconv.Atoi(r.URL.Query().Get("provisioned"))
-		err = handleCheck(ctx, payload, provisioned)
+		var check checkTask
+		if err = json.Unmarshal(body, &check); err == nil {
+			err = handleCheck(ctx, check)
+		}
 	default:
 		http.Error(w, "unknown task path", http.StatusNotFound)
 		return
@@ -498,39 +502,42 @@ func HandleTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleQueued(ctx context.Context, event WorkflowJobEvent) error {
-	provisioned, err := provisionJob(ctx, event)
-	if err != nil || !provisioned {
+	runner, err := provisionJob(ctx, event)
+	if err != nil || runner == nil {
 		return err
 	}
-	return scheduleCheck(ctx, event, 0)
+	return scheduleCheck(ctx, checkTask{WorkflowJobEvent: event, Runner: *runner, Step: 1})
 }
 
-// provisionJob creates the job's VM and reports whether it did.
-func provisionJob(ctx context.Context, event WorkflowJobEvent) (bool, error) {
+// provisionJob creates the job's VM and returns the runner it resolved, or nil
+// when it created none.
+func provisionJob(ctx context.Context, event WorkflowJobEvent) (*RunnerLabels, error) {
 	job := parseJobLabels(event.WorkflowJob.Labels)
 	if job == nil {
 		log.Printf("Job %d: not a gcrunner job, skipping", event.WorkflowJob.ID)
-		return false, nil
+		return nil, nil
 	}
 
 	labels, err := resolveJob(ctx, event, job)
 	if err == nil {
 		log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
-		err = provisionVM(ctx, event, labels)
+		if err = provisionVM(ctx, event, labels); err == nil {
+			return labels, nil
+		}
 	}
 	if !errors.Is(err, errConfiguration) {
-		return err == nil, err
+		return nil, err
 	}
 	// A retry cannot fix the workflow; a queued job cannot be failed, so the
 	// commit gets a failed check and the run is cancelled.
 	log.Printf("Job %d: %v, failing the run", event.WorkflowJob.ID, err)
 	if err := failRun(ctx, event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob, err); err != nil {
 		if !isForbidden(err) {
-			return false, fmt.Errorf("fail run for job %d: %w", event.WorkflowJob.ID, err)
+			return nil, fmt.Errorf("fail run for job %d: %w", event.WorkflowJob.ID, err)
 		}
 		log.Printf("Job %d: could not fail the run: %v", event.WorkflowJob.ID, err)
 	}
-	return false, nil
+	return nil, nil
 }
 
 const (
@@ -540,46 +547,58 @@ const (
 	reprovisions = 3
 )
 
+// checkTask carries the runner resolved when the job was queued, so a later
+// config change cannot fail a job that was valid.
+type checkTask struct {
+	WorkflowJobEvent
+	Runner      RunnerLabels `json:"gcrunner_runner"`
+	Provisioned int          `json:"gcrunner_provisioned"`
+	Step        int          `json:"gcrunner_step"`
+}
+
 // handleCheck replaces the runner of a job still queued after its VM is gone.
-func handleCheck(ctx context.Context, event WorkflowJobEvent, provisioned int) error {
-	owner, repo, id := event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob.ID
-	status, err := jobStatus(ctx, owner, repo, id)
+func handleCheck(ctx context.Context, check checkTask) error {
+	owner, repo, id := check.Repository.Owner.Login, check.Repository.Name, check.WorkflowJob.ID
+	state, err := jobStatus(ctx, owner, repo, id)
 	if err != nil {
 		return fmt.Errorf("check job %d: %w", id, err)
 	}
-	if status != jobStatusQueued {
+	if state != jobStatusQueued {
 		return nil
 	}
-	name := fmt.Sprintf("gcrunner-%d-%d", event.WorkflowJob.RunID, id)
+	name := fmt.Sprintf("gcrunner-%d-%d", check.WorkflowJob.RunID, id)
 	zone, err := findZone(ctx, name)
 	if err != nil {
 		return err
 	}
+	next := check
+	next.Step++
 	if zone == "" {
-		if provisioned >= reprovisions {
-			log.Printf("Job %d: still queued after %d replacement runners, giving up", id, provisioned)
+		if check.Provisioned >= reprovisions {
+			log.Printf("Job %d: still queued after %d replacement runners, giving up", id, check.Provisioned)
 			return nil
 		}
-		log.Printf("Job %d: still queued and VM %s is gone, replacing its runner", id, name)
-		created, err := provisionJob(ctx, event)
-		if err != nil || !created {
-			return err
-		}
-		provisioned++
+		next.Provisioned++
 	}
-	return scheduleCheck(ctx, event, provisioned)
+	// Scheduled first, so a retry of this check reuses the task name and count.
+	if err := scheduleCheck(ctx, next); err != nil || zone != "" {
+		return err
+	}
+	log.Printf("Job %d: still queued and VM %s is gone, replacing its runner", id, name)
+	return provisionVM(ctx, check.WorkflowJobEvent, &check.Runner)
 }
 
-// scheduleCheck schedules handleCheck for later, named by its due time like deferRerun.
-func scheduleCheck(ctx context.Context, event WorkflowJobEvent, provisioned int) error {
-	body, err := json.Marshal(event)
+// scheduleCheck schedules handleCheck for later. The name is fixed per step, so
+// a retried task that already scheduled its successor does not start a second chain.
+func scheduleCheck(ctx context.Context, check checkTask) error {
+	body, err := json.Marshal(check)
 	if err != nil {
-		return fmt.Errorf("encode job %d: %w", event.WorkflowJob.ID, err)
+		return fmt.Errorf("encode job %d: %w", check.WorkflowJob.ID, err)
 	}
-	at := time.Now().Add(checkDelay)
-	name := fmt.Sprintf("job-%d-check-%d", event.WorkflowJob.ID, at.Unix())
-	if err := schedule(ctx, fmt.Sprintf("%s?provisioned=%d", checkPath, provisioned), body, name, at); err != nil {
-		return fmt.Errorf("schedule check of job %d: %w", event.WorkflowJob.ID, err)
+	name := fmt.Sprintf("job-%d-check-%d", check.WorkflowJob.ID, check.Step)
+	err = schedule(ctx, checkPath, body, name, time.Now().Add(checkDelay))
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		return fmt.Errorf("schedule check of job %d: %w", check.WorkflowJob.ID, err)
 	}
 	return nil
 }

@@ -2,79 +2,188 @@ package function
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// check delivers a task for job 42 of run 7 to path with GitHub reporting the
-// job as status and VM gcrunner-7-42 in zone ("" when gone), and reports the
-// VMs provisioned and the tasks scheduled.
-func check(t *testing.T, path, status, zone string) (int, []scheduledTask) {
+type pendingTask struct {
+	path string
+	body []byte
+}
+
+// recovery stands in for GitHub, Compute Engine and Cloud Tasks around job 42
+// of run 7: GitHub reports the job as github.jobStatus, VM gcrunner-7-42 is in
+// zone ("" when gone), and task names are unique as in Cloud Tasks.
+type recovery struct {
+	t             *testing.T
+	github        *github
+	zone          string
+	runners       []RunnerLabels
+	pending       []pendingTask
+	names         map[string]bool
+	failSchedule  int
+	failProvision int
+}
+
+func newRecovery(t *testing.T, config string) *recovery {
 	t.Helper()
-	useGitHub(t, &github{jobStatus: status})
-	tasks := recordSchedule(t)
-	originalProvision, originalZone, originalFetch := provisionVM, findZone, fetchRepositoryFile
+	r := &recovery{t: t, github: &github{jobStatus: "queued"}, names: map[string]bool{}}
+	useGitHub(t, r.github)
+	originalProvision, originalZone, originalFetch, originalSchedule := provisionVM, findZone, fetchRepositoryFile, schedule
 	t.Cleanup(func() {
-		provisionVM, findZone, fetchRepositoryFile = originalProvision, originalZone, originalFetch
+		provisionVM, findZone, fetchRepositoryFile, schedule = originalProvision, originalZone, originalFetch, originalSchedule
 		configCache.configs = map[string]configCacheEntry{}
 	})
-	configCache.configs = map[string]configCacheEntry{}
-	fetchRepositoryFile = func(_ context.Context, _, _, _, _ string) ([]byte, error) { return nil, errConfigNotFound }
-	provisioned := 0
-	provisionVM = func(context.Context, WorkflowJobEvent, *RunnerLabels) error {
-		provisioned++
+	r.useConfig(config)
+	provisionVM = func(_ context.Context, _ WorkflowJobEvent, labels *RunnerLabels) error {
+		if r.failProvision > 0 {
+			r.failProvision--
+			return errors.New("every zone out of quota")
+		}
+		r.runners = append(r.runners, *labels)
 		return nil
 	}
 	findZone = func(_ context.Context, name string) (string, error) {
 		if name != "gcrunner-7-42" {
 			t.Errorf("looked up VM %s, want gcrunner-7-42", name)
 		}
-		return zone, nil
+		return r.zone, nil
 	}
-
-	event := WorkflowJobEvent{
-		Action:      "queued",
-		WorkflowJob: WorkflowJob{ID: 42, Name: "deploy", RunID: 7, Labels: gcrunnerLabels},
-		Repository:  cloudRepository,
+	schedule = func(_ context.Context, path string, body []byte, name string, at time.Time) error {
+		if r.failSchedule > 0 {
+			r.failSchedule--
+			return errors.New("cloud tasks unavailable")
+		}
+		if r.names[name] {
+			return fmt.Errorf("create task: %w", status.Error(codes.AlreadyExists, "task exists"))
+		}
+		if !at.After(time.Now()) {
+			t.Errorf("task %s due %s, want later", name, at)
+		}
+		r.names[name] = true
+		r.pending = append(r.pending, pendingTask{path, body})
+		return nil
 	}
-	if code := deliverTask(t, path, event); code != http.StatusOK {
-		t.Fatalf("%s: status %d, want 200", path, code)
-	}
-	return provisioned, *tasks
+	return r
 }
 
-func TestAQueuedJobIsCheckedAfterItsVMIsCreated(t *testing.T) {
-	provisioned, tasks := check(t, "/task/queued", "", "")
-	if provisioned != 1 || len(tasks) != 1 {
-		t.Fatalf("%d VMs and %d tasks, want 1 and 1", provisioned, len(tasks))
-	}
-	if tasks[0].path != "/task/check?provisioned=0" || !tasks[0].at.After(time.Now()) {
-		t.Errorf("scheduled %s at %s, want /task/check?provisioned=0 later", tasks[0].path, tasks[0].at)
+func (r *recovery) useConfig(config string) {
+	configCache.configs = map[string]configCacheEntry{}
+	fetchRepositoryFile = func(_ context.Context, _, _, _, _ string) ([]byte, error) { return []byte(config), nil }
+}
+
+func (r *recovery) deliver(task pendingTask) int {
+	request := httptest.NewRequest(http.MethodPost, task.path, strings.NewReader(string(task.body)))
+	request.Header.Set("X-CloudTasks-TaskName", "task-42")
+	response := httptest.NewRecorder()
+	HandleTask(response, request)
+	return response.Code
+}
+
+// queue delivers the job's queued task, as the webhook does.
+func (r *recovery) queue() {
+	r.t.Helper()
+	body := fmt.Sprintf(`{"action": "queued", "workflow_job": {"id": 42, "name": "deploy", "run_id": 7, "labels": ["gcrunner=7/runner=deploy"]}, ` +
+		`"repository": {"full_name": "appwrite-labs/cloud", "name": "cloud", "owner": {"login": "appwrite-labs"}}}`)
+	if code := r.deliver(pendingTask{"/task/queued", []byte(body)}); code != http.StatusOK {
+		r.t.Fatalf("queued task: status %d, want 200", code)
 	}
 }
 
-func TestACheckReplacesOnlyTheRunnerOfAQueuedJobWhoseVMIsGone(t *testing.T) {
+// next delivers the earliest scheduled task and reports its status, or false
+// when none is left.
+func (r *recovery) next() (int, bool) {
+	if len(r.pending) == 0 {
+		return 0, false
+	}
+	task := r.pending[0]
+	r.pending = r.pending[1:]
+	code := r.deliver(task)
+	if code != http.StatusOK {
+		r.pending = append([]pendingTask{task}, r.pending...)
+	}
+	return code, true
+}
+
+// drain delivers scheduled tasks, retrying failures as Cloud Tasks does,
+// until none is left.
+func (r *recovery) drain() {
+	r.t.Helper()
+	for range 20 {
+		if _, ok := r.next(); !ok {
+			return
+		}
+	}
+	r.t.Fatal("checks never stopped")
+}
+
+const deployConfig = "runners:\n  deploy:\n    machine: n2d-standard-2\n"
+
+func TestAJobStillQueuedAfterItsVMIsGoneGetsAtMostThreeNewRunners(t *testing.T) {
+	r := newRecovery(t, deployConfig)
+	r.queue()
+	r.drain()
+	if len(r.runners) != 4 {
+		t.Errorf("%d runners, want the first and 3 replacements", len(r.runners))
+	}
+}
+
+func TestACheckLeavesAJobThatDoesNotNeedANewRunner(t *testing.T) {
 	for name, c := range map[string]struct {
-		path, status, zone string
-		provisioned        int
-		next               string
+		status, zone string
+		checking     bool
 	}{
-		"runner dropped before the job reached it": {"/task/check?provisioned=0", "queued", "", 1, "/task/check?provisioned=1"},
-		"VM still booting or listening":            {"/task/check?provisioned=1", "queued", "us-east1-b", 0, "/task/check?provisioned=1"},
-		"replacements used up":                     {"/task/check?provisioned=3", "queued", "", 0, ""},
-		"job started":                              {"/task/check?provisioned=0", "in_progress", "", 0, ""},
-		"job finished":                             {"/task/check?provisioned=0", "completed", "", 0, ""},
-		"job waiting on concurrency or approval":   {"/task/check?provisioned=0", "waiting", "", 0, ""},
+		"VM booting or listening":                {"queued", "us-east1-b", true},
+		"job started":                            {"in_progress", "", false},
+		"job finished":                           {"completed", "", false},
+		"job waiting on concurrency or approval": {"waiting", "", false},
 	} {
-		provisioned, tasks := check(t, c.path, c.status, c.zone)
-		var next []string
-		for _, task := range tasks {
-			next = append(next, task.path)
+		r := newRecovery(t, deployConfig)
+		r.queue()
+		r.github.jobStatus, r.zone = c.status, c.zone
+		if code, _ := r.next(); code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", name, code)
 		}
-		if provisioned != c.provisioned || strings.Join(next, ",") != c.next {
-			t.Errorf("%s: %d VMs and next check %q, want %d and %q", name, provisioned, next, c.provisioned, c.next)
+		if len(r.runners) != 1 || (len(r.pending) == 1) != c.checking {
+			t.Errorf("%s: %d runners and %d checks pending, want 1 runner and checking %t", name, len(r.runners), len(r.pending), c.checking)
 		}
+	}
+}
+
+func TestARetriedCheckKeepsCountOfTheRunnersItReplaced(t *testing.T) {
+	for name, fail := range map[string]func(*recovery){
+		"scheduling the next check failed": func(r *recovery) { r.failSchedule = 1 },
+		"creating the VM failed":           func(r *recovery) { r.failProvision = 1 },
+	} {
+		r := newRecovery(t, deployConfig)
+		r.queue()
+		fail(r)
+		if code, _ := r.next(); code != http.StatusInternalServerError {
+			t.Fatalf("%s: status %d, want 500 so Cloud Tasks retries", name, code)
+		}
+		r.drain()
+		if len(r.runners) != 4 {
+			t.Errorf("%s: %d runners, want the first and 3 replacements", name, len(r.runners))
+		}
+	}
+}
+
+func TestAReplacementRunnerIgnoresConfigChangesSinceTheJobWasQueued(t *testing.T) {
+	r := newRecovery(t, deployConfig)
+	r.queue()
+	r.useConfig("runners:\n  build:\n    machine: n2d-standard-8\n")
+	if code, _ := r.next(); code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	if len(r.runners) != 2 || r.runners[1] != r.runners[0] || r.github.cancels != 0 {
+		t.Errorf("runners %+v and %d cancels, want the queued runner twice and no cancel", r.runners, r.github.cancels)
 	}
 }
