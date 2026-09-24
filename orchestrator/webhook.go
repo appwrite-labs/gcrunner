@@ -580,12 +580,15 @@ func handleCheck(ctx context.Context, check checkTask) error {
 		}
 		next.Provisioned++
 	}
-	// Scheduled first, so a retry of this check reuses the task name and count.
 	if err := scheduleCheck(ctx, next); err != nil || zone != "" {
 		return err
 	}
 	log.Printf("Job %d: still queued and VM %s is gone, replacing its runner", id, name)
-	return provisionVM(ctx, check.WorkflowJobEvent, &check.Runner)
+	if err := provisionVM(ctx, check.WorkflowJobEvent, &check.Runner); err != nil {
+		// The next check is already scheduled and tries again, so a retry here would only overlap it.
+		return errors.Join(errPermanent, fmt.Errorf("replace runner of job %d: %w", id, err))
+	}
+	return nil
 }
 
 // scheduleCheck schedules handleCheck for later. The name is fixed per step, so

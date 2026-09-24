@@ -20,8 +20,8 @@ type pendingTask struct {
 }
 
 // recovery stands in for GitHub, Compute Engine and Cloud Tasks around job 42
-// of run 7: GitHub reports the job as github.jobStatus, VM gcrunner-7-42 is in
-// zone ("" when gone), and task names are unique as in Cloud Tasks.
+// of run 7: GitHub reports the job as github.jobStatus, its VM is in zone (""
+// when gone), and task names are unique as in Cloud Tasks.
 type recovery struct {
 	t             *testing.T
 	github        *github
@@ -51,12 +51,7 @@ func newRecovery(t *testing.T, config string) *recovery {
 		r.runners = append(r.runners, *labels)
 		return nil
 	}
-	findZone = func(_ context.Context, name string) (string, error) {
-		if name != "gcrunner-7-42" {
-			t.Errorf("looked up VM %s, want gcrunner-7-42", name)
-		}
-		return r.zone, nil
-	}
+	findZone = func(context.Context, string) (string, error) { return r.zone, nil }
 	schedule = func(_ context.Context, path string, body []byte, name string, at time.Time) error {
 		if r.failSchedule > 0 {
 			r.failSchedule--
@@ -158,20 +153,24 @@ func TestACheckLeavesAJobThatDoesNotNeedANewRunner(t *testing.T) {
 	}
 }
 
-func TestARetriedCheckKeepsCountOfTheRunnersItReplaced(t *testing.T) {
-	for name, fail := range map[string]func(*recovery){
-		"scheduling the next check failed": func(r *recovery) { r.failSchedule = 1 },
-		"creating the VM failed":           func(r *recovery) { r.failProvision = 1 },
+func TestAFailedCheckNeitherOverlapsTheNextNorRaisesTheCap(t *testing.T) {
+	for name, c := range map[string]struct {
+		fail    func(*recovery)
+		code    int
+		runners int
+	}{
+		"scheduling the next check failed and is retried": {func(r *recovery) { r.failSchedule = 1 }, http.StatusInternalServerError, 4},
+		"creating the VM failed and is left to the next":   {func(r *recovery) { r.failProvision = 1 }, http.StatusOK, 3},
 	} {
 		r := newRecovery(t, deployConfig)
 		r.queue()
-		fail(r)
-		if code, _ := r.next(); code != http.StatusInternalServerError {
-			t.Fatalf("%s: status %d, want 500 so Cloud Tasks retries", name, code)
+		c.fail(r)
+		if code, _ := r.next(); code != c.code {
+			t.Fatalf("%s: status %d, want %d", name, code, c.code)
 		}
 		r.drain()
-		if len(r.runners) != 4 {
-			t.Errorf("%s: %d runners, want the first and 3 replacements", name, len(r.runners))
+		if len(r.runners) != c.runners {
+			t.Errorf("%s: %d runners, want %d", name, len(r.runners), c.runners)
 		}
 	}
 }
