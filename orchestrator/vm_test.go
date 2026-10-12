@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
-	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 // startVM creates a VM for a job and boots it: the startup script handed to
@@ -292,17 +293,53 @@ func TestEveryVMIsDeletedWhenItsLifetimeCapPasses(t *testing.T) {
 	}
 }
 
-// A runner that deleted its own VM leaves the orchestrator's wait with a 404,
-// which must count as deleted or Cloud Tasks retries the completed task.
-func TestNotFoundIsRecognisedThroughWrapping(t *testing.T) {
-	notFound := &googleapi.Error{Code: http.StatusNotFound, Message: "The resource was not found"}
-	if !isNotFound(fmt.Errorf("wait: %w", notFound)) {
-		t.Error("a wrapped 404 was not recognised")
+// instances stands in for the Compute instances API: it finds gcrunner-7-42
+// in us-central1-a, answers its delete with deleted, and finishes that delete
+// with finished, the HTTP status a failed operation reports.
+func instances(t *testing.T, deleted, finished int) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/aggregated/instances"):
+			fmt.Fprint(w, `{"items": {"zones/us-central1-a": {"instances": [{"name": "gcrunner-7-42"}]}}}`)
+		case r.Method == http.MethodDelete && deleted != http.StatusOK:
+			http.Error(w, `{"error": {"code": 404, "message": "The resource was not found"}}`, deleted)
+		case r.Method == http.MethodDelete:
+			fmt.Fprint(w, `{"name": "operation-1", "status": "RUNNING"}`)
+		case finished != http.StatusOK:
+			fmt.Fprintf(w, `{"name": "operation-1", "status": "DONE", "httpErrorStatusCode": %d, "httpErrorMessage": "NOT FOUND", `+
+				`"error": {"errors": [{"code": "RESOURCE_NOT_FOUND"}]}}`, finished)
+		default:
+			fmt.Fprint(w, `{"name": "operation-1", "status": "DONE"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { computeOptions = nil })
+	t.Setenv("GCP_PROJECT", "p")
+	computeOptions = []option.ClientOption{option.WithEndpoint(server.URL), option.WithoutAuthentication()}
+}
+
+// A runner deletes its own VM on exit, so the orchestrator's delete races it
+// and can see the VM vanish. That must count as deleted, or Cloud Tasks
+// retries the completed task.
+func TestDeletingAVMThatDeletedItselfSucceeds(t *testing.T) {
+	for name, statuses := range map[string][2]int{
+		"gone before the delete":      {http.StatusNotFound, 0},
+		"gone during the delete":      {http.StatusOK, http.StatusNotFound},
+		"deleted by the orchestrator": {http.StatusOK, http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			instances(t, statuses[0], statuses[1])
+			if err := deleteRunnerVM(context.Background(), "gcrunner-7-42"); err != nil {
+				t.Errorf("delete failed: %v", err)
+			}
+		})
 	}
-	if isNotFound(&googleapi.Error{Code: http.StatusServiceUnavailable}) {
-		t.Error("a 503 was treated as not found")
-	}
-	if isNotFound(nil) {
-		t.Error("no error was treated as not found")
+}
+
+func TestADeleteThatFailsIsReported(t *testing.T) {
+	instances(t, http.StatusOK, http.StatusServiceUnavailable)
+	if err := deleteRunnerVM(context.Background(), "gcrunner-7-42"); err == nil {
+		t.Error("a failed delete was reported as done")
 	}
 }

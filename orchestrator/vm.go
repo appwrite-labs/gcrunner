@@ -536,7 +536,7 @@ func deleteRunnerVM(ctx context.Context, name string) error {
 		return nil
 	}
 
-	client, err := compute.NewInstancesRESTClient(ctx)
+	client, err := compute.NewInstancesRESTClient(ctx, computeOptions...)
 	if err != nil {
 		return fmt.Errorf("create compute client: %w", err)
 	}
