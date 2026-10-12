@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/protobuf/proto"
@@ -534,7 +536,7 @@ func deleteRunnerVM(ctx context.Context, name string) error {
 		return nil
 	}
 
-	client, err := compute.NewInstancesRESTClient(ctx)
+	client, err := compute.NewInstancesRESTClient(ctx, computeOptions...)
 	if err != nil {
 		return fmt.Errorf("create compute client: %w", err)
 	}
@@ -545,14 +547,25 @@ func deleteRunnerVM(ctx context.Context, name string) error {
 		Zone:     zone,
 		Instance: name,
 	})
+	if err == nil {
+		err = op.Wait(ctx)
+	}
+	if isNotFound(err) {
+		log.Printf("VM %s already deleted in %s", name, zone)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("delete VM %s in %s: %w", name, zone, err)
 	}
-	if err := op.Wait(ctx); err != nil {
-		return fmt.Errorf("wait for VM %s to delete in %s: %w", name, zone, err)
-	}
 	log.Printf("Deleted VM %s in %s", name, zone)
 	return nil
+}
+
+// isNotFound reports a 404 from Compute Engine. A runner deletes its own VM on
+// exit, so the VM can disappear while the orchestrator deletes it too.
+func isNotFound(err error) bool {
+	var apiError *googleapi.Error
+	return errors.As(err, &apiError) && apiError.Code == http.StatusNotFound
 }
 
 // imageProject is where the built-in images and any image definition without
