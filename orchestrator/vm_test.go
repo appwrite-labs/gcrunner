@@ -3,6 +3,8 @@ package function
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
+	"google.golang.org/api/googleapi"
 )
 
 // startVM creates a VM for a job and boots it: the startup script handed to
@@ -286,5 +289,20 @@ func TestEveryVMIsDeletedWhenItsLifetimeCapPasses(t *testing.T) {
 				t.Errorf("provisioning model = %q, want spot=%v", got.GetProvisioningModel(), tt.spot)
 			}
 		})
+	}
+}
+
+// A runner that deleted its own VM leaves the orchestrator's wait with a 404,
+// which must count as deleted or Cloud Tasks retries the completed task.
+func TestNotFoundIsRecognisedThroughWrapping(t *testing.T) {
+	notFound := &googleapi.Error{Code: http.StatusNotFound, Message: "The resource was not found"}
+	if !isNotFound(fmt.Errorf("wait: %w", notFound)) {
+		t.Error("a wrapped 404 was not recognised")
+	}
+	if isNotFound(&googleapi.Error{Code: http.StatusServiceUnavailable}) {
+		t.Error("a 503 was treated as not found")
+	}
+	if isNotFound(nil) {
+		t.Error("no error was treated as not found")
 	}
 }
