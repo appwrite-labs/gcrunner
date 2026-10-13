@@ -15,9 +15,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
 var githubClient = &http.Client{Timeout: 30 * time.Second}
@@ -413,6 +415,12 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 type workflowRun struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	// HeadRepository is the repository the run's code and workflow come
+	// from: a fork for a pull request from one, and null once that fork is
+	// deleted.
+	HeadRepository *struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
 }
 
 func fetchRun(ctx context.Context, owner, repo string, runID int64, installationToken string) (*workflowRun, error) {
@@ -431,6 +439,70 @@ func fetchRun(ctx context.Context, owner, repo string, runID int64, installation
 		return nil, fmt.Errorf("decode run %d: %w", runID, err)
 	}
 	return &run, nil
+}
+
+// runSources remembers where each run comes from, which never changes for a
+// run, so the jobs of one run (dozens, queued together) cost one lookup.
+var runSources = &runSourceCache{sources: make(map[string]runSourceEntry), ttl: 6 * time.Hour, nowFunc: time.Now}
+
+type runSourceCache struct {
+	mu      sync.Mutex
+	sources map[string]runSourceEntry
+	ttl     time.Duration
+	nowFunc func() time.Time
+	group   singleflight.Group
+}
+
+type runSourceEntry struct {
+	source    string
+	fetchedAt time.Time
+}
+
+// lookupRunSource returns the full name of the repository the job's run
+// comes from, or "" when GitHub no longer knows it. Failed lookups are not
+// remembered.
+func lookupRunSource(ctx context.Context, event WorkflowJobEvent) (string, error) {
+	owner, repo, runID := event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob.RunID
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, runID)
+	c := runSources
+	c.mu.Lock()
+	entry, ok := c.sources[key]
+	c.mu.Unlock()
+	if ok && c.nowFunc().Sub(entry.fetchedAt) < c.ttl {
+		return entry.source, nil
+	}
+
+	// Shared by every job of the run waiting on it, so it must outlive the
+	// first job's request.
+	fetchCtx := context.WithoutCancel(ctx)
+	source, err, _ := c.group.Do(key, func() (any, error) {
+		installationToken, err := getInstallationToken(fetchCtx, owner)
+		if err != nil {
+			return "", fmt.Errorf("get installation token: %w", err)
+		}
+		run, err := fetchRun(fetchCtx, owner, repo, runID, installationToken)
+		if err != nil {
+			return "", fmt.Errorf("look up run %d: %w", runID, err)
+		}
+		source := ""
+		if run.HeadRepository != nil {
+			source = run.HeadRepository.FullName
+		}
+		now := c.nowFunc()
+		c.mu.Lock()
+		for key, entry := range c.sources {
+			if now.Sub(entry.fetchedAt) >= c.ttl {
+				delete(c.sources, key)
+			}
+		}
+		c.sources[key] = runSourceEntry{source: source, fetchedAt: now}
+		c.mu.Unlock()
+		return source, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return source.(string), nil
 }
 
 const (

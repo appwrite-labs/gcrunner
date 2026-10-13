@@ -15,6 +15,22 @@ Every incoming webhook from GitHub is authenticated using HMAC-SHA256. GitHub si
 
 The webhook secret is stored in Google Secret Manager and never appears in logs, environment variables, or Terraform state.
 
+## Jobs From Forks
+
+**Attack vector:** A pull request from a fork runs arbitrary code on a VM in your project.
+
+A pull request runs its own copy of the workflow, so a fork can rewrite `runs-on` to ask for any gcrunner label, whatever the repository's own workflow says. An expression in `runs-on` that sends fork pull requests to GitHub-hosted runners only steers well-behaved ones. gcrunner itself therefore looks up the run of every queued job and refuses it when the run comes from another repository (`head_repository` differs from the repository, or is gone because the fork was deleted). The run gets a failed `gcrunner` check saying why and is cancelled; no VM is created.
+
+Give jobs from forks a GitHub-hosted runner, for example:
+
+```yaml
+runs-on: >-
+  ${{ (github.event_name != 'pull_request'
+  || github.event.pull_request.head.repo.full_name == github.repository)
+  && format('gcrunner={0}', github.run_id)
+  || 'ubuntu-latest' }}
+```
+
 ## Ephemeral, Isolated VMs
 
 **Attack vector:** A compromised job contaminates future jobs or pivots to other workloads.
