@@ -518,7 +518,11 @@ func provisionJob(ctx context.Context, event WorkflowJobEvent) (*RunnerLabels, e
 		return nil, nil
 	}
 
-	labels, err := resolveJob(ctx, event, job)
+	var labels *RunnerLabels
+	err := checkRunSource(ctx, event)
+	if err == nil {
+		labels, err = resolveJob(ctx, event, job)
+	}
 	if err == nil {
 		log.Printf("Job %d: creating VM with labels %+v", event.WorkflowJob.ID, labels)
 		if err = provisionVM(ctx, event, labels); err == nil {
@@ -611,6 +615,30 @@ var (
 	provisionVM = createRunnerVM
 	findZone    = findInstanceZone
 )
+
+// Indirected so tests that don't look at where a run comes from need no
+// GitHub API.
+var runSource = lookupRunSource
+
+// checkRunSource refuses a job whose run comes from another repository, such
+// as a pull request from a fork. That run uses the fork's copy of the
+// workflow, which can ask for any gcrunner label whatever the repository's
+// own workflow says, so a fork must never get a VM. A run GitHub no longer
+// ties to a repository is refused too.
+func checkRunSource(ctx context.Context, event WorkflowJobEvent) error {
+	source, err := runSource(ctx, event)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(source, event.Repository.FullName) {
+		if source == "" {
+			source = "a repository GitHub no longer knows"
+		}
+		return fmt.Errorf("%w: run %d comes from %s, and gcrunner only runs jobs from %s itself; give jobs from forks a GitHub-hosted runner",
+			errConfiguration, event.WorkflowJob.RunID, source, event.Repository.FullName)
+	}
+	return nil
+}
 
 // resolveJob turns the job's labels into a runner using the repository's config.
 func resolveJob(ctx context.Context, event WorkflowJobEvent, job *JobLabels) (*RunnerLabels, error) {

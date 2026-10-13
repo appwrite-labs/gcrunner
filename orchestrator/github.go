@@ -413,6 +413,12 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 type workflowRun struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	// HeadRepository is the repository the run's code and workflow come
+	// from: a fork for a pull request from one, and null once that fork is
+	// deleted.
+	HeadRepository *struct {
+		FullName string `json:"full_name"`
+	} `json:"head_repository"`
 }
 
 func fetchRun(ctx context.Context, owner, repo string, runID int64, installationToken string) (*workflowRun, error) {
@@ -431,6 +437,24 @@ func fetchRun(ctx context.Context, owner, repo string, runID int64, installation
 		return nil, fmt.Errorf("decode run %d: %w", runID, err)
 	}
 	return &run, nil
+}
+
+// lookupRunSource returns the full name of the repository the job's run
+// comes from, or "" when GitHub no longer knows it.
+func lookupRunSource(ctx context.Context, event WorkflowJobEvent) (string, error) {
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	installationToken, err := getInstallationToken(ctx, owner)
+	if err != nil {
+		return "", fmt.Errorf("get installation token: %w", err)
+	}
+	run, err := fetchRun(ctx, owner, repo, event.WorkflowJob.RunID, installationToken)
+	if err != nil {
+		return "", fmt.Errorf("look up run %d: %w", event.WorkflowJob.RunID, err)
+	}
+	if run.HeadRepository == nil {
+		return "", nil
+	}
+	return run.HeadRepository.FullName, nil
 }
 
 const (

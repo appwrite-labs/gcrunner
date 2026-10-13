@@ -25,19 +25,22 @@ var (
 
 // github stands in for api.github.com: it reports the run as runStatus
 // (completed when empty) with runConclusion (failure when empty and
-// completed) and job 42 as jobStatus, answers the rerun request
+// completed) from headRepository (null when empty), or answers the run with
+// runLookupStatus when set, reports job 42 as jobStatus, answers the rerun request
 // with rerunStatus and the check run with checkStatus, lists the run's latest
 // jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
-	runStatus     string
-	runConclusion string
-	jobStatus     string
-	rerunStatus   int
-	checkStatus   int
-	latest        map[string][]int
-	reruns        int
-	cancels       int
-	checks        []map[string]any
+	runStatus       string
+	runConclusion   string
+	headRepository  string
+	runLookupStatus int
+	jobStatus       string
+	rerunStatus     int
+	checkStatus     int
+	latest          map[string][]int
+	reruns          int
+	cancels         int
+	checks          []map[string]any
 }
 
 func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -57,7 +60,14 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		if status == "completed" && conclusion == "" {
 			conclusion = "failure"
 		}
-		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q}`, status, conclusion))
+		if g.runLookupStatus != 0 {
+			return answer(g.runLookupStatus, `{"message": "Server Error"}`)
+		}
+		head := "null"
+		if g.headRepository != "" {
+			head = fmt.Sprintf(`{"full_name": %q}`, g.headRepository)
+		}
+		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q, "head_repository": %s}`, status, conclusion, head))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42":
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, g.jobStatus))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
