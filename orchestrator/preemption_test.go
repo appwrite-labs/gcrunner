@@ -26,7 +26,7 @@ var (
 // github stands in for api.github.com: it reports the run as runStatus
 // (completed when empty) with runConclusion (failure when empty and
 // completed) from headRepository (null when empty), or answers the run with
-// runLookupStatus when set, reports job 42 as jobStatus, answers the rerun request
+// runLookupStatus when set, counting runLookups, reports job 42 as jobStatus, answers the rerun request
 // with rerunStatus and the check run with checkStatus, lists the run's latest
 // jobs from latest (name to attempts), and records what it was asked to do.
 type github struct {
@@ -34,6 +34,7 @@ type github struct {
 	runConclusion   string
 	headRepository  string
 	runLookupStatus int
+	runLookups      int
 	jobStatus       string
 	rerunStatus     int
 	checkStatus     int
@@ -60,6 +61,7 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		if status == "completed" && conclusion == "" {
 			conclusion = "failure"
 		}
+		g.runLookups++
 		if g.runLookupStatus != 0 {
 			return answer(g.runLookupStatus, `{"message": "Server Error"}`)
 		}

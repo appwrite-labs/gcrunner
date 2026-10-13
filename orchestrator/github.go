@@ -15,9 +15,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
 var githubClient = &http.Client{Timeout: 30 * time.Second}
@@ -439,22 +441,68 @@ func fetchRun(ctx context.Context, owner, repo string, runID int64, installation
 	return &run, nil
 }
 
+// runSources remembers where each run comes from, which never changes for a
+// run, so the jobs of one run (dozens, queued together) cost one lookup.
+var runSources = &runSourceCache{sources: make(map[string]runSourceEntry), ttl: 6 * time.Hour, nowFunc: time.Now}
+
+type runSourceCache struct {
+	mu      sync.Mutex
+	sources map[string]runSourceEntry
+	ttl     time.Duration
+	nowFunc func() time.Time
+	group   singleflight.Group
+}
+
+type runSourceEntry struct {
+	source    string
+	fetchedAt time.Time
+}
+
 // lookupRunSource returns the full name of the repository the job's run
-// comes from, or "" when GitHub no longer knows it.
+// comes from, or "" when GitHub no longer knows it. Failed lookups are not
+// remembered.
 func lookupRunSource(ctx context.Context, event WorkflowJobEvent) (string, error) {
-	owner, repo := event.Repository.Owner.Login, event.Repository.Name
-	installationToken, err := getInstallationToken(ctx, owner)
+	owner, repo, runID := event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob.RunID
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, runID)
+	c := runSources
+	c.mu.Lock()
+	entry, ok := c.sources[key]
+	c.mu.Unlock()
+	if ok && c.nowFunc().Sub(entry.fetchedAt) < c.ttl {
+		return entry.source, nil
+	}
+
+	// Shared by every job of the run waiting on it, so it must outlive the
+	// first job's request.
+	fetchCtx := context.WithoutCancel(ctx)
+	source, err, _ := c.group.Do(key, func() (any, error) {
+		installationToken, err := getInstallationToken(fetchCtx, owner)
+		if err != nil {
+			return "", fmt.Errorf("get installation token: %w", err)
+		}
+		run, err := fetchRun(fetchCtx, owner, repo, runID, installationToken)
+		if err != nil {
+			return "", fmt.Errorf("look up run %d: %w", runID, err)
+		}
+		source := ""
+		if run.HeadRepository != nil {
+			source = run.HeadRepository.FullName
+		}
+		now := c.nowFunc()
+		c.mu.Lock()
+		for key, entry := range c.sources {
+			if now.Sub(entry.fetchedAt) >= c.ttl {
+				delete(c.sources, key)
+			}
+		}
+		c.sources[key] = runSourceEntry{source: source, fetchedAt: now}
+		c.mu.Unlock()
+		return source, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("get installation token: %w", err)
+		return "", err
 	}
-	run, err := fetchRun(ctx, owner, repo, event.WorkflowJob.RunID, installationToken)
-	if err != nil {
-		return "", fmt.Errorf("look up run %d: %w", event.WorkflowJob.RunID, err)
-	}
-	if run.HeadRepository == nil {
-		return "", nil
-	}
-	return run.HeadRepository.FullName, nil
+	return source.(string), nil
 }
 
 const (

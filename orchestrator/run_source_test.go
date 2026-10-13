@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestMain points runSource at the job's own repository, so tests that are
@@ -17,11 +18,17 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// withRunSourceLookup makes jobs look their run up through GitHub, starting
+// from an empty cache.
 func withRunSourceLookup(t *testing.T) {
 	t.Helper()
 	original := runSource
 	runSource = lookupRunSource
-	t.Cleanup(func() { runSource = original })
+	runSources.sources = map[string]runSourceEntry{}
+	t.Cleanup(func() {
+		runSource = original
+		runSources.sources = map[string]runSourceEntry{}
+	})
 }
 
 // A pull request from a fork runs the fork's copy of the workflow, which can
@@ -66,5 +73,46 @@ func TestAFailedRunLookupIsRetried(t *testing.T) {
 	}
 	if gh.cancels != 0 || len(gh.checks) != 0 {
 		t.Errorf("failed the run (%d checks, %d cancels) without knowing where it comes from", len(gh.checks), gh.cancels)
+	}
+}
+
+// The jobs of one run share a lookup, until it expires.
+func TestJobsOfOneRunLookItUpOnce(t *testing.T) {
+	withRunSourceLookup(t)
+	gh := &github{headRepository: "appwrite-labs/cloud"}
+	useGitHub(t, gh)
+	now := jobStart
+	runSources.nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { runSources.nowFunc = time.Now })
+	for id := int64(1); id <= 3; id++ {
+		event := WorkflowJobEvent{WorkflowJob: WorkflowJob{ID: id, RunID: 7}, Repository: cloudRepository}
+		if err := checkRunSource(context.Background(), event); err != nil {
+			t.Fatalf("job %d refused: %v", id, err)
+		}
+	}
+	if gh.runLookups != 1 {
+		t.Errorf("%d lookups for three jobs of one run, want 1", gh.runLookups)
+	}
+	now = now.Add(runSources.ttl)
+	if err := checkRunSource(context.Background(), WorkflowJobEvent{WorkflowJob: WorkflowJob{ID: 4, RunID: 7}, Repository: cloudRepository}); err != nil {
+		t.Fatal(err)
+	}
+	if gh.runLookups != 2 {
+		t.Errorf("%d lookups, want the expired entry looked up again", gh.runLookups)
+	}
+}
+
+// A failed lookup is not remembered: the retry asks GitHub again.
+func TestAFailedRunLookupIsNotRemembered(t *testing.T) {
+	withRunSourceLookup(t)
+	gh := &github{headRepository: "appwrite-labs/cloud", runLookupStatus: http.StatusBadGateway}
+	useGitHub(t, gh)
+	event := WorkflowJobEvent{WorkflowJob: WorkflowJob{ID: 42, RunID: 7}, Repository: cloudRepository}
+	if err := checkRunSource(context.Background(), event); err == nil {
+		t.Fatal("lookup failure not reported")
+	}
+	gh.runLookupStatus = 0
+	if err := checkRunSource(context.Background(), event); err != nil {
+		t.Errorf("retry after GitHub recovered: %v", err)
 	}
 }
