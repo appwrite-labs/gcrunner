@@ -48,7 +48,7 @@ Terraform will update the Cloud Run service to the latest gcrunner image and app
 | Variable | Value |
 |---|---|
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full resource name of the provider |
-| `GCP_SERVICE_ACCOUNT` | Service account that can apply the Terraform; grant `roles/iam.workloadIdentityUser` to `principal://iam.googleapis.com/<pool>/subject/repo:<owner>/<repo>:environment:production` |
+| `GCP_SERVICE_ACCOUNT` | Service account that can apply the Terraform; grant `roles/iam.workloadIdentityUser` to `principal://iam.googleapis.com/<pool>/subject/<prefix>:environment:production`, where `<prefix>` is the `sub_claim_prefix` from `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` (`repo:<owner>/<repo>`, or `repo:<owner>@<id>/<repo>@<id>` with immutable subjects) |
 | `TF_STATE_BUCKET`, `TF_STATE_PREFIX` | Terraform state location |
 | `TERRAFORM_VARIABLES` | Body of a `.tfvars` file, without `gcrunner_version` |
 | `TELEMETRY_HEADERS_SECRET` | Optional Secret Manager secret holding `telemetry_headers` |
