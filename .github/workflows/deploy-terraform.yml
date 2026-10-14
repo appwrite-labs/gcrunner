@@ -1,107 +1,79 @@
-name: Deploy Terraform (Main)
+name: Deploy Terraform
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "terraform/**"
-      - "orchestrator/**"
-      - ".github/workflows/deploy-terraform.yml"
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to deploy, e.g. v0.2.0-appwrite.19'
+        required: true
+
+concurrency:
+  group: deploy-terraform
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  publish-orchestrator:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./orchestrator
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-
   deploy:
-    needs: publish-orchestrator
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    environment: production
+    env:
+      VERSION: ${{ inputs.version || github.event.workflow_run.head_branch }}
     defaults:
       run:
         working-directory: terraform
     steps:
-      - uses: actions/checkout@v4
+      - name: Check version
+        working-directory: .
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$VERSION is not a release tag"
+            exit 1
+          fi
 
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@v7
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY_DEPLOY }}
+          ref: refs/tags/${{ env.VERSION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
+      - name: Write variables
+        env:
+          TERRAFORM_VARIABLES: ${{ vars.TERRAFORM_VARIABLES }}
+          TELEMETRY_HEADERS_SECRET: ${{ vars.TELEMETRY_HEADERS_SECRET }}
+        run: |
+          umask 077
+          printf '%s\n' "$TERRAFORM_VARIABLES" > "$RUNNER_TEMP/deploy.tfvars"
+          echo "TF_VAR_gcrunner_version=$VERSION" >> "$GITHUB_ENV"
+          if [ -n "$TELEMETRY_HEADERS_SECRET" ]; then
+            headers=$(gcloud secrets versions access latest --secret "$TELEMETRY_HEADERS_SECRET")
+            echo "::add-mask::$headers"
+            echo "TF_VAR_telemetry_headers=$headers" >> "$GITHUB_ENV"
+          fi
 
       - name: Terraform Init
         run: |
-          terraform init \
+          terraform init -input=false \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="prefix=gcrunner-main"
+            -backend-config="prefix=${{ vars.TF_STATE_PREFIX }}"
 
       - name: Terraform Plan
-        run: |
-          terraform plan \
-            -var="project_id=${{ vars.TF_PROJECT_ID }}" \
-            -var="gcrunner_version=${{ github.sha }}" \
-            -out=tfplan
+        run: terraform plan -input=false -var-file="$RUNNER_TEMP/deploy.tfvars" -out="$RUNNER_TEMP/tfplan"
 
       - name: Terraform Apply
-        run: terraform apply tfplan
-
-  smoke-test-n2d-go:
-    needs: deploy
-    runs-on: gcrunner=${{ github.run_id }}-n2d/machine=n2d-standard-2
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - name: Build orchestrator
-        run: cd orchestrator && go build ./...
-      - name: Test orchestrator
-        run: cd orchestrator && go test ./...
-
-  smoke-test-e2-node:
-    needs: deploy
-    runs-on: gcrunner=${{ github.run_id }}-e2/machine=e2-medium
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Node smoke test
-        run: node -e "console.log('Node', process.version, 'on', process.arch, process.platform)"
-      - name: System info
-        run: |
-          echo "CPUs: $(nproc)"
-          echo "Memory: $(free -h | awk '/Mem:/{print $2}')"
-          df -h /
-
-  smoke-test-c3-go:
-    needs: deploy
-    runs-on: gcrunner=${{ github.run_id }}-c3/family=c3/cpu=4
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - name: Build cache-server
-        run: cd cache-server && go build ./...
-      - name: Test cache-server
-        run: cd cache-server && go test ./...
+        run: terraform apply -input=false "$RUNNER_TEMP/tfplan"
