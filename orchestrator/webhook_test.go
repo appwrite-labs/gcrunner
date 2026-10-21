@@ -3,7 +3,12 @@ package function
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // completedJob drives handleCompleted for a job of run 7 and reports which VM
@@ -92,5 +97,25 @@ func TestCompletedJobKeepsTheVMWhenGitHubCannotBeReached(t *testing.T) {
 	}
 	if err := handleCompleted(context.Background(), event); err == nil {
 		t.Error("handleCompleted returned nil, want the error so Cloud Tasks retries")
+	}
+}
+
+func TestAWebhookForAnAlreadyEnqueuedJobIsAccepted(t *testing.T) {
+	event := WorkflowJobEvent{
+		Action:      "queued",
+		WorkflowJob: WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels},
+		Repository:  Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
+	}
+	for name, c := range map[string]struct {
+		enqueued error
+		code     int
+	}{
+		"enqueued":         {nil, http.StatusOK},
+		"already enqueued": {fmt.Errorf("create task: %w", status.Error(codes.AlreadyExists, "task exists")), http.StatusOK},
+		"queue down":       {fmt.Errorf("create task: %w", status.Error(codes.Unavailable, "unavailable")), http.StatusInternalServerError},
+	} {
+		if code := deliverWebhookEnqueuing(t, event, c.enqueued); code != c.code {
+			t.Errorf("%s: status %d, want %d", name, code, c.code)
+		}
 	}
 }

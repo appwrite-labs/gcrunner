@@ -412,7 +412,12 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := enqueue(ctx, taskPath, body, payload.WorkflowJob.ID); err != nil {
+	err = enqueue(ctx, taskPath, body, payload.WorkflowJob.ID)
+	if status.Code(err) == codes.AlreadyExists {
+		log.Printf("Job %d: %s task already enqueued", payload.WorkflowJob.ID, payload.Action)
+		err = nil
+	}
+	if err != nil {
 		log.Printf("ERROR enqueuing task for job %d: %v", payload.WorkflowJob.ID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -517,6 +522,9 @@ func provisionJob(ctx context.Context, event WorkflowJobEvent) (*RunnerLabels, e
 		log.Printf("Job %d: not a gcrunner job, skipping", event.WorkflowJob.ID)
 		return nil, nil
 	}
+	if left, err := leftQueue(ctx, event); err != nil || left {
+		return nil, err
+	}
 
 	var labels *RunnerLabels
 	err := checkRunSource(ctx, event)
@@ -542,6 +550,26 @@ func provisionJob(ctx context.Context, event WorkflowJobEvent) (*RunnerLabels, e
 		log.Printf("Job %d: could not fail the run: %v", event.WorkflowJob.ID, err)
 	}
 	return nil, nil
+}
+
+// A late webhook or a retry can arrive after the job has left the queue.
+const staleQueued = time.Minute
+
+// leftQueue reports whether a job queued a while ago has since started or finished.
+func leftQueue(ctx context.Context, event WorkflowJobEvent) (bool, error) {
+	if time.Since(event.WorkflowJob.CreatedAt) < staleQueued {
+		return false, nil
+	}
+	owner, repo, id := event.Repository.Owner.Login, event.Repository.Name, event.WorkflowJob.ID
+	state, err := queuedJobStatus(ctx, owner, repo, id)
+	if err != nil {
+		return false, fmt.Errorf("check job %d: %w", id, err)
+	}
+	if state != jobStatusInProgress && state != jobStatusCompleted {
+		return false, nil
+	}
+	log.Printf("Job %d: already %s, not creating a VM", id, state)
+	return true, nil
 }
 
 const (
@@ -616,9 +644,12 @@ var (
 	findZone    = findInstanceZone
 )
 
-// Indirected so tests that don't look at where a run comes from need no
-// GitHub API.
-var runSource = lookupRunSource
+// Indirected so tests that don't look at where a run comes from, or whether
+// its job is still queued, need no GitHub API.
+var (
+	runSource       = lookupRunSource
+	queuedJobStatus = jobStatus
+)
 
 // checkRunSource refuses a job whose run comes from another repository, such
 // as a pull request from a fork. That run uses the fork's copy of the

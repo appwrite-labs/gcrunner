@@ -15,6 +15,7 @@ func TestMain(m *testing.M) {
 	runSource = func(_ context.Context, event WorkflowJobEvent) (string, error) {
 		return event.Repository.FullName, nil
 	}
+	queuedJobStatus = func(context.Context, string, string, int64) (string, error) { return jobStatusQueued, nil }
 	os.Exit(m.Run())
 }
 

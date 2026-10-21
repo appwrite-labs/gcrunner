@@ -510,7 +510,11 @@ const (
 	runConclusionCancelled = "cancelled"
 )
 
-const jobStatusQueued = "queued"
+const (
+	jobStatusQueued     = "queued"
+	jobStatusInProgress = "in_progress"
+	jobStatusCompleted  = "completed"
+)
 
 // jobStatus returns the job's status as GitHub reports it.
 func jobStatus(ctx context.Context, owner, repo string, jobID int64) (string, error) {
