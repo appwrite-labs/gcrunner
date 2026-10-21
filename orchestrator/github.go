@@ -113,45 +113,91 @@ func getRegistrationToken(ctx context.Context, owner, repo string) (string, erro
 	return result.Token, nil
 }
 
-// getInstallationToken gets an installation access token for the GitHub App.
+// installationTokens keeps each owner's installation token until shortly before it expires.
+var installationTokens = &tokenCache{tokens: make(map[string]cachedToken), nowFunc: time.Now}
+
+// tokenRefreshMargin keeps a token from expiring during the request using it.
+const tokenRefreshMargin = 5 * time.Minute
+
+type tokenCache struct {
+	mu      sync.Mutex
+	tokens  map[string]cachedToken
+	nowFunc func() time.Time
+	group   singleflight.Group
+}
+
+type cachedToken struct {
+	value     string
+	expiresAt time.Time
+}
+
+// getInstallationToken returns an installation access token for the owner.
+// Failed requests are not remembered.
 func getInstallationToken(ctx context.Context, owner string) (string, error) {
-	appJWT, err := generateAppJWT(ctx)
-	if err != nil {
-		return "", fmt.Errorf("generate JWT: %w", err)
+	c := installationTokens
+	c.mu.Lock()
+	token, ok := c.tokens[owner]
+	c.mu.Unlock()
+	if ok && c.nowFunc().Add(tokenRefreshMargin).Before(token.expiresAt) {
+		return token.value, nil
 	}
 
-	// First, find the installation ID for this owner
+	// Shared by every request waiting on it, so it must outlive the first.
+	fetchCtx := context.WithoutCancel(ctx)
+	value, err, _ := c.group.Do(owner, func() (any, error) {
+		token, err := createInstallationToken(fetchCtx, owner)
+		if err != nil {
+			return "", err
+		}
+		c.mu.Lock()
+		c.tokens[owner] = token
+		c.mu.Unlock()
+		return token.value, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func createInstallationToken(ctx context.Context, owner string) (cachedToken, error) {
+	appJWT, err := generateAppJWT(ctx)
+	if err != nil {
+		return cachedToken{}, fmt.Errorf("generate JWT: %w", err)
+	}
+
 	installationID, err := getInstallationID(ctx, appJWT, owner)
 	if err != nil {
-		return "", fmt.Errorf("get installation ID: %w", err)
+		return cachedToken{}, fmt.Errorf("get installation ID: %w", err)
 	}
 
 	endpoint := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
 	if err != nil {
-		return "", err
+		return cachedToken{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+appJWT)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := githubClient.Do(req)
 	if err != nil {
-		return "", err
+		return cachedToken{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, string(body))
+		return cachedToken{}, fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
-		Token string `json:"token"`
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return cachedToken{}, err
 	}
-	return result.Token, nil
+	return cachedToken{value: result.Token, expiresAt: result.ExpiresAt}, nil
 }
 
 // getInstallationID finds the installation ID for a given owner (org or user).
