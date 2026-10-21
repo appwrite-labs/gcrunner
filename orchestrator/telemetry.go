@@ -76,6 +76,7 @@ type instruments struct {
 	jobs          metric.Int64Counter
 	queueDuration metric.Float64Histogram
 	jobDuration   metric.Float64Histogram
+	webhookLag    metric.Float64Histogram
 	vmCreates     metric.Int64Counter
 	tasks         metric.Int64Counter
 	taskRetries   metric.Int64Histogram
@@ -204,6 +205,10 @@ func newInstruments(provider metric.MeterProvider) instruments {
 		metric.WithUnit("s"),
 		metric.WithDescription("Time from a job starting on a runner to it completing"),
 		metric.WithExplicitBucketBoundaries(durationBuckets...))
+	webhookLag, _ := meter.Float64Histogram("gcrunner.webhook.lag",
+		metric.WithUnit("s"),
+		metric.WithDescription("Time from a job changing status on GitHub to its workflow_job webhook arriving"),
+		metric.WithExplicitBucketBoundaries(durationBuckets...))
 	vmCreates, _ := meter.Int64Counter("gcrunner.vm.creates",
 		metric.WithUnit("{attempt}"),
 		metric.WithDescription("VM creation attempts, one per zone tried, by outcome"))
@@ -218,6 +223,7 @@ func newInstruments(provider metric.MeterProvider) instruments {
 		jobs:          jobs,
 		queueDuration: queueDuration,
 		jobDuration:   jobDuration,
+		webhookLag:    webhookLag,
 		vmCreates:     vmCreates,
 		tasks:         tasks,
 		taskRetries:   taskRetries,
@@ -241,6 +247,11 @@ func recordJob(ctx context.Context, event WorkflowJobEvent) {
 		attribute.String(attributeRepository, event.Repository.FullName),
 		attribute.String(attributeWorkflow, job.WorkflowName),
 	)
+	if at := job.changedAt(event.Action); !at.IsZero() {
+		t.webhookLag.Record(ctx, max(time.Since(at).Seconds(), 0),
+			metric.WithAttributes(attribute.String(attributeStatus, event.Action)))
+	}
+
 	switch event.Action {
 	case "in_progress":
 		if !job.CreatedAt.IsZero() && !job.StartedAt.IsZero() {
@@ -251,6 +262,19 @@ func recordJob(ctx context.Context, event WorkflowJobEvent) {
 			t.jobDuration.Record(ctx, job.CompletedAt.Sub(job.StartedAt).Seconds(), timing)
 		}
 	}
+}
+
+// changedAt is when the job entered the status a webhook reports.
+func (job WorkflowJob) changedAt(action string) time.Time {
+	switch action {
+	case "queued":
+		return job.CreatedAt
+	case "in_progress":
+		return job.StartedAt
+	case "completed":
+		return job.CompletedAt
+	}
+	return time.Time{}
 }
 
 // ran is false for a job GitHub cancelled while still queued: no runner name,
