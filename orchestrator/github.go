@@ -144,7 +144,7 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 
 	// Shared by every request waiting on it, so it must outlive the first.
 	fetchCtx := context.WithoutCancel(ctx)
-	value, err, _ := c.group.Do(owner, func() (any, error) {
+	result := c.group.DoChan(owner, func() (any, error) {
 		token, err := createInstallationToken(fetchCtx, owner)
 		if err != nil {
 			return "", err
@@ -154,10 +154,15 @@ func getInstallationToken(ctx context.Context, owner string) (string, error) {
 		c.mu.Unlock()
 		return token.value, nil
 	})
-	if err != nil {
-		return "", err
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-result:
+		if r.Err != nil {
+			return "", r.Err
+		}
+		return r.Val.(string), nil
 	}
-	return value.(string), nil
 }
 
 func createInstallationToken(ctx context.Context, owner string) (cachedToken, error) {

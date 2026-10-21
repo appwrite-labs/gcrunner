@@ -2,6 +2,7 @@ package function
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -78,15 +79,26 @@ func TestConcurrentJobsShareOneInstallationTokenRequest(t *testing.T) {
 		}
 	}
 
-	// The first job to ask gives up while GitHub is still answering. The
-	// jobs waiting alongside it must still get the token.
+	// The first job to ask gives up while GitHub is still answering. It
+	// returns at once, and the jobs waiting alongside it still get the token.
 	first, cancel := context.WithCancel(context.Background())
-	wg.Add(1)
-	go request(first)
+	abandoned := make(chan error)
+	go func() {
+		_, err := getInstallationToken(first, "appwrite-labs")
+		abandoned <- err
+	}()
 	for gh.tokens.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
+	select {
+	case err := <-abandoned:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the job that gave up got err = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the job that gave up kept waiting for GitHub")
+	}
 	for i := 0; i < 19; i++ {
 		wg.Add(1)
 		go request(context.Background())
