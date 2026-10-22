@@ -103,11 +103,17 @@ func histogram(t *testing.T, collected metricdata.ResourceMetrics, name string, 
 // Secret Manager and Cloud Tasks stood in for, and reports the status code.
 func deliverWebhook(t *testing.T, event WorkflowJobEvent) int {
 	t.Helper()
+	return deliverWebhookEnqueuing(t, event, nil)
+}
+
+// deliverWebhookEnqueuing is deliverWebhook with Cloud Tasks answering enqueued.
+func deliverWebhookEnqueuing(t *testing.T, event WorkflowJobEvent, enqueued error) int {
+	t.Helper()
 	const secret = "webhook-secret"
 	originalSecret, originalEnqueue := loadSecret, enqueue
 	t.Cleanup(func() { loadSecret, enqueue = originalSecret, originalEnqueue })
 	loadSecret = func(_ context.Context, _ string) (string, error) { return secret, nil }
-	enqueue = func(_ context.Context, _ string, _ []byte, _ int64) error { return nil }
+	enqueue = func(_ context.Context, _ string, _ []byte, _ int64) error { return enqueued }
 
 	body, err := json.Marshal(event)
 	if err != nil {

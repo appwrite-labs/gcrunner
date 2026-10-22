@@ -2,8 +2,15 @@ package function
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // completedJob drives handleCompleted for a job of run 7 and reports which VM
@@ -92,5 +99,54 @@ func TestCompletedJobKeepsTheVMWhenGitHubCannotBeReached(t *testing.T) {
 	}
 	if err := handleCompleted(context.Background(), event); err == nil {
 		t.Error("handleCompleted returned nil, want the error so Cloud Tasks retries")
+	}
+}
+
+func TestAWebhookForAnAlreadyEnqueuedJobIsAccepted(t *testing.T) {
+	taken := fmt.Errorf("create task: %w", status.Error(codes.AlreadyExists, "task exists"))
+	down := fmt.Errorf("create task: %w", status.Error(codes.Unavailable, "unavailable"))
+	for name, c := range map[string]struct {
+		action   string
+		enqueued error
+		requeued error
+		code     int
+		requeues int
+	}{
+		"enqueued":                        {"queued", nil, nil, http.StatusOK, 0},
+		"queue down":                      {"queued", down, nil, http.StatusInternalServerError, 0},
+		"queued task name taken":          {"queued", taken, nil, http.StatusOK, 1},
+		"retry already enqueued":          {"queued", taken, taken, http.StatusOK, 1},
+		"queue down for the retry":        {"queued", taken, down, http.StatusInternalServerError, 1},
+		"completed task already enqueued": {"completed", taken, nil, http.StatusOK, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			event := WorkflowJobEvent{
+				Action:      c.action,
+				WorkflowJob: WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels},
+				Repository:  Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}},
+			}
+			original := schedule
+			t.Cleanup(func() { schedule = original })
+			var requeues []string
+			schedule = func(_ context.Context, path string, body []byte, _ string, _ time.Time) error {
+				var requeued WorkflowJobEvent
+				if err := json.Unmarshal(body, &requeued); err != nil || requeued.WorkflowJob.ID != 42 {
+					t.Errorf("requeued body for job %d, err %v", requeued.WorkflowJob.ID, err)
+				}
+				requeues = append(requeues, path)
+				return c.requeued
+			}
+			if code := deliverWebhookEnqueuing(t, event, c.enqueued); code != c.code {
+				t.Errorf("status %d, want %d", code, c.code)
+			}
+			if len(requeues) != c.requeues {
+				t.Fatalf("requeued %d times, want %d", len(requeues), c.requeues)
+			}
+			for _, path := range requeues {
+				if path != "/task/queued" {
+					t.Errorf("requeued to %s, want /task/queued", path)
+				}
+			}
+		})
 	}
 }

@@ -31,18 +31,20 @@ type recovery struct {
 	names         map[string]bool
 	failSchedule  int
 	failProvision int
+	created       time.Time
 }
 
 func newRecovery(t *testing.T, config string) *recovery {
 	t.Helper()
 	r := &recovery{t: t, github: &github{jobStatus: "queued"}, names: map[string]bool{}}
 	useGitHub(t, r.github)
-	originalProvision, originalZone, originalFetch, originalSchedule := provisionVM, findZone, fetchRepositoryFile, schedule
+	originalProvision, originalZone, originalFetch, originalSchedule, originalStatus := provisionVM, findZone, fetchRepositoryFile, schedule, queuedJobStatus
 	t.Cleanup(func() {
-		provisionVM, findZone, fetchRepositoryFile, schedule = originalProvision, originalZone, originalFetch, originalSchedule
+		provisionVM, findZone, fetchRepositoryFile, schedule, queuedJobStatus = originalProvision, originalZone, originalFetch, originalSchedule, originalStatus
 		configCache.configs = map[string]configCacheEntry{}
 	})
 	r.useConfig(config)
+	queuedJobStatus = jobStatus
 	provisionVM = func(_ context.Context, _ WorkflowJobEvent, labels *RunnerLabels) error {
 		if r.failProvision > 0 {
 			r.failProvision--
@@ -86,8 +88,8 @@ func (r *recovery) deliver(task pendingTask) int {
 // queue delivers the job's queued task, as the webhook does.
 func (r *recovery) queue() {
 	r.t.Helper()
-	body := fmt.Sprintf(`{"action": "queued", "workflow_job": {"id": 42, "name": "deploy", "run_id": 7, "labels": ["gcrunner=7/runner=deploy"]}, ` +
-		`"repository": {"full_name": "appwrite-labs/cloud", "name": "cloud", "owner": {"login": "appwrite-labs"}}}`)
+	body := fmt.Sprintf(`{"action": "queued", "workflow_job": {"id": 42, "name": "deploy", "run_id": 7, "labels": ["gcrunner=7/runner=deploy"], "created_at": %q}, `+
+		`"repository": {"full_name": "appwrite-labs/cloud", "name": "cloud", "owner": {"login": "appwrite-labs"}}}`, r.created.Format(time.RFC3339))
 	if code := r.deliver(pendingTask{"/task/queued", []byte(body)}); code != http.StatusOK {
 		r.t.Fatalf("queued task: status %d, want 200", code)
 	}
@@ -184,5 +186,26 @@ func TestAReplacementRunnerIgnoresConfigChangesSinceTheJobWasQueued(t *testing.T
 	}
 	if len(r.runners) != 2 || r.runners[1] != r.runners[0] || r.github.cancels != 0 {
 		t.Errorf("runners %+v and %d cancels, want the queued runner twice and no cancel", r.runners, r.github.cancels)
+	}
+}
+
+func TestAQueuedTaskCreatesNoVMForAJobThatLeftTheQueue(t *testing.T) {
+	for name, c := range map[string]struct {
+		status  string
+		age     time.Duration
+		runners int
+	}{
+		"late, still queued":         {"queued", 10 * time.Minute, 1},
+		"late, waiting for approval": {"waiting", 10 * time.Minute, 1},
+		"late, already started":      {"in_progress", 10 * time.Minute, 0},
+		"late, already finished":     {"completed", 10 * time.Minute, 0},
+		"on time, not looked up":     {"completed", 0, 1},
+	} {
+		r := newRecovery(t, deployConfig)
+		r.github.jobStatus, r.created = c.status, time.Now().Add(-c.age)
+		r.queue()
+		if len(r.runners) != c.runners || len(r.pending) != c.runners {
+			t.Errorf("%s: %d runners and %d checks pending, want %d of each", name, len(r.runners), len(r.pending), c.runners)
+		}
 	}
 }
