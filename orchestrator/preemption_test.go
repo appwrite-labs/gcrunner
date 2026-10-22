@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +29,9 @@ var (
 // completed) from headRepository (null when empty), or answers the run with
 // runLookupStatus when set, counting runLookups, reports job 42 as jobStatus, answers the rerun request
 // with rerunStatus and the check run with checkStatus, lists the run's latest
-// jobs from latest (name to attempts), and records what it was asked to do.
+// jobs from latest (name to attempts), issues installation tokens expiring at
+// tokenExpiry (or fails them with tokenStatus) once tokenRelease is closed,
+// counting tokens, and records what it was asked to do.
 type github struct {
 	runStatus       string
 	runConclusion   string
@@ -42,6 +45,10 @@ type github struct {
 	reruns          int
 	cancels         int
 	checks          []map[string]any
+	tokenExpiry     time.Time
+	tokenStatus     int
+	tokenRelease    chan struct{}
+	tokens          atomic.Int32
 }
 
 func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -52,7 +59,14 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == "/users/appwrite-labs/installation":
 		return answer(http.StatusOK, `{"id": 5}`)
 	case req.URL.Path == "/app/installations/5/access_tokens":
-		return answer(http.StatusCreated, `{"token": "ghs_test"}`)
+		g.tokens.Add(1)
+		if g.tokenRelease != nil {
+			<-g.tokenRelease
+		}
+		if g.tokenStatus != 0 {
+			return answer(g.tokenStatus, `{"message": "Server Error"}`)
+		}
+		return answer(http.StatusCreated, fmt.Sprintf(`{"token": "ghs_test", "expires_at": %q}`, g.tokenExpiry.Format(time.RFC3339)))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7":
 		status, conclusion := g.runStatus, g.runConclusion
 		if status == "" {
@@ -140,6 +154,8 @@ func useGitHub(t *testing.T, gh *github) {
 		return map[string]string{"gcrunner-app-id": "1", "gcrunner-private-key": keyPEM}[name], nil
 	}
 	githubClient.Transport = gh
+	installationTokens.tokens = map[string]cachedToken{}
+	t.Cleanup(func() { installationTokens.tokens = map[string]cachedToken{} })
 }
 
 // deliverTask posts event to the task path as Cloud Tasks does and reports

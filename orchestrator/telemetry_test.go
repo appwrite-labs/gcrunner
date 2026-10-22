@@ -168,6 +168,24 @@ func TestJobWebhooksAreCountedWithTheirTimings(t *testing.T) {
 	}
 }
 
+func TestWebhookLagIsMeasuredFromTheStatusChange(t *testing.T) {
+	collect := collectMetrics(t)
+	now := time.Now()
+	job := WorkflowJob{ID: 42, RunID: 7, Labels: gcrunnerLabels, WorkflowName: "CI", RunnerName: "gcrunner-7-42",
+		CreatedAt: now.Add(-30 * time.Minute), StartedAt: now.Add(-20 * time.Minute), CompletedAt: now.Add(-90 * time.Second)}
+	repository := Repository{FullName: "appwrite-labs/cloud", Name: "cloud", Owner: RepositoryOwner{Login: "appwrite-labs"}}
+
+	for action, lag := range map[string]float64{"queued": 1800, "in_progress": 1200, "completed": 90} {
+		if code := deliverWebhook(t, WorkflowJobEvent{Action: action, WorkflowJob: job, Repository: repository}); code != http.StatusOK {
+			t.Fatalf("%s webhook: status %d", action, code)
+		}
+		count, sum := histogram(t, collect(), "gcrunner.webhook.lag", attribute.String("status", action))
+		if count != 1 || sum < lag || sum > lag+60 {
+			t.Errorf("%s lag count=%d sum=%v, want one observation of about %vs", action, count, sum, lag)
+		}
+	}
+}
+
 func TestJobsCancelledWhileQueuedRecordNoDuration(t *testing.T) {
 	collect := collectMetrics(t)
 	created := time.Date(2026, 9, 20, 7, 29, 0, 0, time.UTC)
