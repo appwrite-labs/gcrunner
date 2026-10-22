@@ -414,8 +414,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	err = enqueue(ctx, taskPath, body, payload.WorkflowJob.ID)
 	if status.Code(err) == codes.AlreadyExists {
-		log.Printf("Job %d: %s task already enqueued", payload.WorkflowJob.ID, payload.Action)
-		err = nil
+		err = requeue(ctx, taskPath, body, payload)
 	}
 	if err != nil {
 		log.Printf("ERROR enqueuing task for job %d: %v", payload.WorkflowJob.ID, err)
@@ -426,6 +425,29 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Enqueued %s task for job %d", payload.Action, payload.WorkflowJob.ID)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "ok")
+}
+
+// requeueWindow groups duplicate deliveries of a queued job under one retry task.
+const requeueWindow = 5 * time.Minute
+
+// requeue handles a delivery whose task name is taken. Cloud Tasks keeps the
+// name of a task it has already deleted, such as one that ran out of attempts,
+// so a queued job gets a task under a name that changes every requeueWindow.
+// A job that already has a runner is left alone by provisionJob.
+func requeue(ctx context.Context, taskPath string, body []byte, payload WorkflowJobEvent) error {
+	id := payload.WorkflowJob.ID
+	if payload.Action != "queued" {
+		log.Printf("Job %d: %s task already enqueued", id, payload.Action)
+		return nil
+	}
+	now := time.Now()
+	name := fmt.Sprintf("job-%d-queued-%d", id, now.Unix()/int64(requeueWindow.Seconds()))
+	err := schedule(ctx, taskPath, body, name, now)
+	if status.Code(err) == codes.AlreadyExists {
+		log.Printf("Job %d: queued task already enqueued", id)
+		return nil
+	}
+	return err
 }
 
 // Indirected so tests can drive handleWebhook without Secret Manager or
