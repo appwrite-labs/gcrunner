@@ -20,6 +20,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The images environment (main and v* tags only) is the subject the
+    # gcrunner-image-builder service account trusts for workload identity.
+    environment: images
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -32,7 +38,8 @@ jobs:
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
