@@ -421,12 +421,18 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	id, err := listedID(ctx, owner, repo, job, installationToken)
+	current, err := listedJob(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return err
 	}
-	if id == 0 {
+	if current == nil {
 		log.Printf("Job %d: rerun already started", job.ID)
+		return nil
+	}
+	// Other reruns may have carried this execution past the attempt the
+	// preemption was checked against.
+	if current.RunAttempt >= rerunAttempts {
+		log.Printf("Job %d: carried into attempt %d, not rerunning past attempt %d", job.ID, current.RunAttempt, rerunAttempts)
 		return nil
 	}
 	run, err := fetchRun(ctx, owner, repo, job.RunID, installationToken)
@@ -441,7 +447,7 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 		log.Printf("Job %d: run %d was cancelled, not rerunning", job.ID, job.RunID)
 		return nil
 	}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, id)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, current.ID)
 	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
 	if err != nil {
 		return err
@@ -452,11 +458,11 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
-	id, err = listedID(ctx, owner, repo, job, installationToken)
+	current, err = listedJob(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return errors.Join(refused, err)
 	}
-	if id == 0 {
+	if current == nil {
 		log.Printf("Job %d: rerun already started", job.ID)
 		return nil
 	}
@@ -592,23 +598,23 @@ func jobStatus(ctx context.Context, owner, repo string, jobID int64) (string, er
 	return job.Status, nil
 }
 
-// listedID returns the id under which the run's latest jobs list this job's
-// execution, or zero once a rerun has replaced it. A rerun of one job copies
+// listedJob returns this job's execution as the run's latest jobs list it, or
+// nil once a rerun has replaced it. A rerun of one job copies
 // every job it leaves alone into the new attempt under a new id and attempt
 // number, keeping the runner and start time, so a later attempt alone does not
 // show this job was rerun, and the copy's id is the one GitHub will rerun.
-func listedID(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (int64, error) {
+func listedJob(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (*WorkflowJob, error) {
 	const perPage = 100
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d", owner, repo, job.RunID, perPage, page)
 		resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return 0, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+			return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
 		}
 		var result struct {
 			Jobs []WorkflowJob `json:"jobs"`
@@ -616,15 +622,15 @@ func listedID(ctx context.Context, owner, repo string, job WorkflowJob, installa
 		err = json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
 		if err != nil {
-			return 0, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
+			return nil, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
 		}
 		for _, candidate := range result.Jobs {
 			if candidate.Name == job.Name && candidate.RunnerName == job.RunnerName && candidate.StartedAt.Equal(job.StartedAt) {
-				return candidate.ID, nil
+				return &candidate, nil
 			}
 		}
 		if len(result.Jobs) < perPage {
-			return 0, nil
+			return nil, nil
 		}
 	}
 }

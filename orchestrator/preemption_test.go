@@ -341,6 +341,15 @@ func TestAJobCarriedIntoAnotherJobsRerunIsStillRerun(t *testing.T) {
 	}
 }
 
+// A deferred rerun still carries the attempt it was preempted on, while other
+// reruns may have carried its execution up to the cap since.
+func TestAJobCarriedToTheLastAttemptIsNotRerun(t *testing.T) {
+	gh := &github{rerunStatus: http.StatusCreated, latest: []WorkflowJob{copied(copied(build, 60), 70)}}
+	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || gh.reruns != 0 {
+		t.Errorf("status %d and %d reruns, want 200 and none", code, gh.reruns)
+	}
+}
+
 func TestOnlyFailuresThatRanHereCheckForPreemption(t *testing.T) {
 	originalOptions := computeOptions
 	t.Cleanup(func() { computeOptions = originalOptions })
