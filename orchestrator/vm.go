@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path"
@@ -199,8 +200,9 @@ func createRunnerVM(ctx context.Context, event WorkflowJobEvent, labels *RunnerL
 
 // createRunnerInstance tries every candidate zone. A zone that is out of quota
 // is skipped like any other soft failure, so one exhausted region does not hold
-// up a job the rest of the pool could run. Zones pinned with a zone= label are
-// tried in the order given; pool zones rotate so consecutive jobs spread out.
+// up a job the rest of the pool could run. Zones pinned with a zone= label
+// rotate like pool zones, so a runner preset that narrows the pool to a few
+// zones still spreads consecutive jobs across them.
 // If no zone accepts the job the last failure is returned, flagged as a quota
 // error when at least one zone was out of quota, which leaves Cloud Tasks to
 // retry once capacity frees.
@@ -220,7 +222,7 @@ func createRunnerInstance(ctx context.Context, labels *RunnerLabels, instanceNam
 	guessed := false
 	switch {
 	case labels.Zone != "":
-		zones = strings.Split(labels.Zone, "+")
+		zones = rotate(strings.Split(labels.Zone, "+"), nextZoneOffset())
 	case len(configuredZones()) > 0:
 		zones = rotate(configuredZones(), nextZoneOffset())
 	default:
@@ -310,7 +312,16 @@ func configuredZones() []string {
 	return zones
 }
 
-var zoneOffset atomic.Uint64
+// zoneOffset starts each process at a random point: Cloud Run runs several
+// instances, and counters that all started at zero would send the first jobs
+// of every instance to the same zone.
+var zoneOffset = newZoneOffset()
+
+func newZoneOffset() *atomic.Uint64 {
+	offset := &atomic.Uint64{}
+	offset.Store(uint64(rand.Uint32()))
+	return offset
+}
 
 // nextZoneOffset spreads consecutive jobs across the pool instead of stacking
 // them all onto whichever zone happens to be listed first.
