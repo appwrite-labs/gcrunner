@@ -22,14 +22,20 @@ import (
 var (
 	jobStart = time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
 	jobEnd   = jobStart.Add(20 * time.Minute)
+
+	// build is the preempted job failedJob reports, and lint its sibling.
+	build      = WorkflowJob{ID: 42, Name: "build", RunAttempt: 1, RunnerName: "gcrunner-7-42", StartedAt: jobStart}
+	buildRerun = WorkflowJob{ID: 50, Name: "build", RunAttempt: 2, RunnerName: "gcrunner-7-50", StartedAt: jobEnd.Add(time.Hour)}
+	lint       = WorkflowJob{ID: 43, Name: "lint", RunAttempt: 1, RunnerName: "gcrunner-7-43", StartedAt: jobStart}
+	lintRerun  = WorkflowJob{ID: 51, Name: "lint", RunAttempt: 2, RunnerName: "gcrunner-7-51", StartedAt: jobEnd.Add(time.Hour)}
 )
 
 // github stands in for api.github.com: it reports the run as runStatus
 // (completed when empty) with runConclusion (failure when empty and
 // completed) from headRepository (null when empty), or answers the run with
-// runLookupStatus when set, counting runLookups, reports job 42 as jobStatus, answers the rerun request
-// with rerunStatus and the check run with checkStatus, lists the run's latest
-// jobs from latest (name to attempts), issues installation tokens expiring at
+// runLookupStatus when set, counting runLookups, reports job 42 as jobStatus, answers rerun requests
+// with rerunStatus, recording the ids in rerunIDs, and the check run with checkStatus, lists the run's
+// latest jobs from latest (build alone when nil), issues installation tokens expiring at
 // tokenExpiry (or fails them with tokenStatus) once tokenRelease is closed,
 // counting tokens, and records what it was asked to do.
 type github struct {
@@ -41,8 +47,9 @@ type github struct {
 	jobStatus       string
 	rerunStatus     int
 	checkStatus     int
-	latest          map[string][]int
+	latest          []WorkflowJob
 	reruns          int
+	rerunIDs        []string
 	cancels         int
 	checks          []map[string]any
 	tokenExpiry     time.Time
@@ -86,8 +93,9 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q, "conclusion": %q, "head_repository": %s}`, status, conclusion, head))
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42":
 		return answer(http.StatusOK, fmt.Sprintf(`{"status": %q}`, g.jobStatus))
-	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/jobs/42/rerun":
+	case strings.HasPrefix(req.URL.Path, "/repos/appwrite-labs/cloud/actions/jobs/") && strings.HasSuffix(req.URL.Path, "/rerun"):
 		g.reruns++
+		g.rerunIDs = append(g.rerunIDs, strings.Split(req.URL.Path, "/")[6])
 		return answer(g.rerunStatus, `{"message": "This workflow is already running"}`)
 	case strings.HasSuffix(req.URL.Path, "/actions/runners/generate-jitconfig"):
 		return answer(http.StatusCreated, `{"encoded_jit_config": "jit"}`)
@@ -104,13 +112,15 @@ func (g *github) RoundTrip(req *http.Request) (*http.Response, error) {
 		g.cancels++
 		return answer(http.StatusAccepted, ``)
 	case req.URL.Path == "/repos/appwrite-labs/cloud/actions/runs/7/jobs" && req.URL.Query().Get("filter") == "latest":
-		var jobs []string
-		for name, attempts := range g.latest {
-			for _, attempt := range attempts {
-				jobs = append(jobs, fmt.Sprintf(`{"name": %q, "run_attempt": %d}`, name, attempt))
-			}
+		latest := g.latest
+		if latest == nil {
+			latest = []WorkflowJob{build}
 		}
-		return answer(http.StatusOK, fmt.Sprintf(`{"jobs": [%s]}`, strings.Join(jobs, ",")))
+		jobs, err := json.Marshal(map[string][]WorkflowJob{"jobs": latest})
+		if err != nil {
+			return nil, err
+		}
+		return answer(http.StatusOK, string(jobs))
 	}
 	return answer(http.StatusNotFound, `{}`)
 }
@@ -221,17 +231,18 @@ func TestOnlyAJobPreemptedWhileRunningIsRerun(t *testing.T) {
 
 // GitHub refuses a rerun while the run is busy, when an earlier delivery of
 // the task already started it, and when the App lacks actions: write. Only a
-// rerun that took is done, and a rerun gives the job a new id, so the proof
-// is every job of its name being on a later attempt; anything less retries.
+// rerun that took is done, and a rerun gives the job a new execution, so the
+// proof is this execution no longer being listed; anything less retries.
 func TestARefusedRerunIsDoneOnlyOnceThisJobHasMovedOn(t *testing.T) {
 	for name, c := range map[string]struct {
-		latest map[string][]int
+		latest []WorkflowJob
 		code   int
 	}{
-		"already rerun":             {map[string][]int{"build": {2}, "lint": {1}}, http.StatusOK},
-		"run busy or no permission": {map[string][]int{"build": {1}, "lint": {1}}, http.StatusInternalServerError},
-		"only a sibling was rerun":  {map[string][]int{"build": {1}, "lint": {2}}, http.StatusInternalServerError},
-		"a namesake was rerun":      {map[string][]int{"build": {2, 1}}, http.StatusInternalServerError},
+		"already rerun":               {[]WorkflowJob{buildRerun, lint}, http.StatusOK},
+		"run busy or no permission":   {[]WorkflowJob{build, lint}, http.StatusInternalServerError},
+		"only a sibling was rerun":    {[]WorkflowJob{build, lintRerun}, http.StatusInternalServerError},
+		"a namesake was rerun":        {[]WorkflowJob{buildRerun, build}, http.StatusInternalServerError},
+		"copied into a later attempt": {[]WorkflowJob{copied(build, 60), lintRerun}, http.StatusInternalServerError},
 	} {
 		gh := &github{rerunStatus: http.StatusForbidden, latest: c.latest}
 		if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != c.code {
@@ -305,10 +316,37 @@ func TestACancelledRunIsNotRerun(t *testing.T) {
 }
 
 func TestARerunThatAlreadyTookIsNotWaitedOn(t *testing.T) {
-	gh := &github{runStatus: "in_progress", rerunStatus: http.StatusCreated, latest: map[string][]int{"build": {2}}}
+	gh := &github{runStatus: "in_progress", rerunStatus: http.StatusCreated, latest: []WorkflowJob{buildRerun}}
 	tasks := recordSchedule(t)
 	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || gh.reruns != 0 || len(*tasks) != 0 {
 		t.Errorf("status %d, %d reruns and %d tasks scheduled, want 200 and none", code, gh.reruns, len(*tasks))
+	}
+}
+
+// copied is job as GitHub lists it once a rerun of another job in its run has
+// carried it into the next attempt: a new id and attempt, the same execution.
+func copied(job WorkflowJob, id int64) WorkflowJob {
+	job.ID = id
+	job.RunAttempt++
+	return job
+}
+
+// Two jobs preempted in one run each ask for a rerun, and the first to get it
+// carries the other into the new attempt still failed. The second must rerun
+// that copy, or the run stays red with nothing left to rerun it.
+func TestAJobCarriedIntoAnotherJobsRerunIsStillRerun(t *testing.T) {
+	gh := &github{rerunStatus: http.StatusCreated, latest: []WorkflowJob{copied(build, 60), lintRerun}}
+	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || len(gh.rerunIDs) != 1 || gh.rerunIDs[0] != "60" {
+		t.Errorf("status %d and reruns of %v, want 200 and one of job 60", code, gh.rerunIDs)
+	}
+}
+
+// A deferred rerun still carries the attempt it was preempted on, while other
+// reruns may have carried its execution up to the cap since.
+func TestAJobCarriedToTheLastAttemptIsNotRerun(t *testing.T) {
+	gh := &github{rerunStatus: http.StatusCreated, latest: []WorkflowJob{copied(copied(build, 60), 70)}}
+	if code := failedJob(t, 1, gh, jobStart.Add(5*time.Minute)); code != http.StatusOK || gh.reruns != 0 {
+		t.Errorf("status %d and %d reruns, want 200 and none", code, gh.reruns)
 	}
 }
 

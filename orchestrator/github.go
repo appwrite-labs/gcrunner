@@ -414,19 +414,25 @@ var errRunBusy = errors.New("run still in progress")
 // rerunWorkflowJob re-queues a job and its dependents as a new attempt of its
 // run. GitHub refuses a rerun while the run is busy, when an earlier call
 // already started it, and when the App lacks actions: write. Only a rerun
-// that took is done, shown by this job being on a later attempt; anything
-// else is an error so the task comes back later.
+// that took is done, shown by this job's execution no longer being listed;
+// anything else is an error so the task comes back later.
 func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) error {
 	installationToken, err := getInstallationToken(ctx, owner)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	attempt, err := latestAttempt(ctx, owner, repo, job, installationToken)
+	current, err := listedJob(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return err
 	}
-	if attempt > job.RunAttempt {
-		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
+	if current == nil {
+		log.Printf("Job %d: rerun already started", job.ID)
+		return nil
+	}
+	// Other reruns may have carried this execution past the attempt the
+	// preemption was checked against.
+	if current.RunAttempt >= rerunAttempts {
+		log.Printf("Job %d: carried into attempt %d, not rerunning past attempt %d", job.ID, current.RunAttempt, rerunAttempts)
 		return nil
 	}
 	run, err := fetchRun(ctx, owner, repo, job.RunID, installationToken)
@@ -441,7 +447,7 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 		log.Printf("Job %d: run %d was cancelled, not rerunning", job.ID, job.RunID)
 		return nil
 	}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, job.ID)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/jobs/%d/rerun", owner, repo, current.ID)
 	resp, err := githubRequest(ctx, "POST", endpoint, installationToken)
 	if err != nil {
 		return err
@@ -452,12 +458,12 @@ func rerunWorkflowJob(ctx context.Context, owner, repo string, job WorkflowJob) 
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	refused := &githubError{Status: resp.StatusCode, Body: string(respBody)}
-	attempt, err = latestAttempt(ctx, owner, repo, job, installationToken)
+	current, err = listedJob(ctx, owner, repo, job, installationToken)
 	if err != nil {
 		return errors.Join(refused, err)
 	}
-	if attempt > job.RunAttempt {
-		log.Printf("Job %d: rerun already started as attempt %d", job.ID, attempt)
+	if current == nil {
+		log.Printf("Job %d: rerun already started", job.ID)
 		return nil
 	}
 	return refused
@@ -592,23 +598,23 @@ func jobStatus(ctx context.Context, owner, repo string, jobID int64) (string, er
 	return job.Status, nil
 }
 
-// latestAttempt returns the earliest attempt among the run's latest jobs of
-// this job's name, or zero when there is none. A rerun gives the job a new
-// id, so the name is the only link across attempts, and jobs can share one,
-// so the rerun counts as started only once every job of that name has moved on.
-func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (int, error) {
+// listedJob returns this job's execution as the run's latest jobs list it, or
+// nil once a rerun has replaced it. A rerun of one job copies
+// every job it leaves alone into the new attempt under a new id and attempt
+// number, keeping the runner and start time, so a later attempt alone does not
+// show this job was rerun, and the copy's id is the one GitHub will rerun.
+func listedJob(ctx context.Context, owner, repo string, job WorkflowJob, installationToken string) (*WorkflowJob, error) {
 	const perPage = 100
-	earliest := 0
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d", owner, repo, job.RunID, perPage, page)
 		resp, err := githubRequest(ctx, "GET", endpoint, installationToken)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return 0, &githubError{Status: resp.StatusCode, Body: string(respBody)}
+			return nil, &githubError{Status: resp.StatusCode, Body: string(respBody)}
 		}
 		var result struct {
 			Jobs []WorkflowJob `json:"jobs"`
@@ -616,15 +622,15 @@ func latestAttempt(ctx context.Context, owner, repo string, job WorkflowJob, ins
 		err = json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
 		if err != nil {
-			return 0, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
+			return nil, fmt.Errorf("decode jobs of run %d: %w", job.RunID, err)
 		}
 		for _, candidate := range result.Jobs {
-			if candidate.Name == job.Name && (earliest == 0 || candidate.RunAttempt < earliest) {
-				earliest = candidate.RunAttempt
+			if candidate.Name == job.Name && candidate.RunnerName == job.RunnerName && candidate.StartedAt.Equal(job.StartedAt) {
+				return &candidate, nil
 			}
 		}
 		if len(result.Jobs) < perPage {
-			return earliest, nil
+			return nil, nil
 		}
 	}
 }
