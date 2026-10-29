@@ -99,7 +99,7 @@ runs-on: gcrunner=${{ github.run_id }}/zone=us-central1-a
 runs-on: gcrunner=${{ github.run_id }}/zone=us-central1-a+us-central1-b
 ```
 
-Zones are tried in the order specified. If a zone has no capacity (or the machine type is unavailable there), gcrunner moves to the next one.
+Consecutive jobs start at the next zone in the list, so jobs spread across every zone you name. If a zone has no capacity (or the machine type is unavailable there), gcrunner moves to the next one.
 
 ## Images
 

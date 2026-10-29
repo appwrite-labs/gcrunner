@@ -31,10 +31,10 @@ func TestZoneSelection(t *testing.T) {
 		wantErr    string           // substring of the final error, "" for success
 	}{
 		{
-			name:      "label zones are tried in the order given",
+			name:      "label zones rotate across consecutive jobs",
 			label:     "zone-b+zone-a",
 			jobs:      3,
-			wantTried: [][]string{{"zone-b"}, {"zone-b"}, {"zone-b"}},
+			wantTried: [][]string{{"zone-b"}, {"zone-a"}, {"zone-b"}},
 		},
 		{
 			name:      "pool zones rotate across consecutive jobs",
