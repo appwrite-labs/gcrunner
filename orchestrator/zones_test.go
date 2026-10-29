@@ -19,6 +19,18 @@ var (
 	errFatal    = errors.New("Permission denied")
 )
 
+func TestEachProcessStartsItsZonesAtARandomPoint(t *testing.T) {
+	zones := []string{"zone-a", "zone-b", "zone-c", "zone-d"}
+	first := map[string]bool{}
+	for range 100 {
+		offset := newZoneOffset()
+		first[rotate(zones, int(offset.Add(1)-1))[0]] = true
+	}
+	if len(first) != len(zones) {
+		t.Errorf("100 processes started their first job in %d of %d zones", len(first), len(zones))
+	}
+}
+
 func TestZoneSelection(t *testing.T) {
 	tests := []struct {
 		name       string

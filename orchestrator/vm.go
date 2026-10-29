@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path"
@@ -311,7 +312,16 @@ func configuredZones() []string {
 	return zones
 }
 
-var zoneOffset atomic.Uint64
+// zoneOffset starts each process at a random point: Cloud Run runs several
+// instances, and counters that all started at zero would send the first jobs
+// of every instance to the same zone.
+var zoneOffset = newZoneOffset()
+
+func newZoneOffset() *atomic.Uint64 {
+	offset := &atomic.Uint64{}
+	offset.Store(uint64(rand.Uint32()))
+	return offset
+}
 
 // nextZoneOffset spreads consecutive jobs across the pool instead of stacking
 // them all onto whichever zone happens to be listed first.
