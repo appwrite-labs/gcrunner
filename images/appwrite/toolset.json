@@ -1,7 +1,7 @@
 {
   "kernel": {
-    "series": "6.8",
-    "package": "linux-gcp-6.8",
+    "series": "6.17",
+    "package": "linux-gcp-6.17",
     "rolling_packages": ["linux-gcp", "linux-image-gcp", "linux-headers-gcp", "linux-modules-extra-gcp"]
   },
   "docker": {
