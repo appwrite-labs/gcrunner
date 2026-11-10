@@ -1,5 +1,7 @@
 #!/bin/bash -e
-# MongoDB 8.0 refuses kernels 6.19 to 7.0.13 (SERVER-121912); boot the GA GCP kernel instead.
+# MongoDB 8.0 refuses kernels 6.19 to 7.0.13 (SERVER-121912), so pin the newest GCP kernel
+# below that range instead of the rolling one. 6.17 (HWE) has io_uring ops 6.8 lacks
+# (IORING_OP_FTRUNCATE, 6.9+).
 series=$(jq -r '.kernel.series' "${APPWRITE_TOOLSET}")
 package=$(jq -r '.kernel.package' "${APPWRITE_TOOLSET}")
 rolling=$(jq -r '.kernel.rolling_packages[]' "${APPWRITE_TOOLSET}")
