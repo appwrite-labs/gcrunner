@@ -22,11 +22,12 @@ systemctl disable apt-daily-upgrade.service
 echo 'Acquire::Retries "1";' > /etc/apt/apt.conf.d/80-retries
 echo 'Acquire::http::Timeout "15";' > /etc/apt/apt.conf.d/80-timeout
 
-# cloud-init writes the region's GCE mirror into ubuntu.sources on each new instance. Some of
-# those mirrors accept the connection and then never answer for certain files, so after
-# cloud-init has run, serve that entry through apt's mirror method with archive.ubuntu.com
-# behind it: a file the regional mirror fails on is fetched from the archive instead. A unit
-# rather than cloud-init's apt.sources, which runs apt-get update on every boot.
+# cloud-init writes the region's GCE mirror into ubuntu.sources on each new instance. Those
+# mirrors can accept the connection and then never answer for some files: in one week of edge
+# CI, 10% of setup-php steps took over 5 minutes against a 57s median. archive.ubuntu.com costs
+# about 12s more for a 67 MB install, so serve it first through apt's mirror method and keep the
+# regional mirror behind it. A unit rather than cloud-init's apt.sources, which runs apt-get
+# update on every boot.
 cat <<'EOF' > /usr/local/sbin/apt-mirror-fallback
 #!/bin/sh -e
 sources=/etc/apt/sources.list.d/ubuntu.sources
@@ -36,14 +37,14 @@ case "$mirror" in
     "" | mirror+*) exit 0 ;;
 esac
 mkdir -p "$(dirname "$list")"
-printf '%s\tpriority:1\nhttp://archive.ubuntu.com/ubuntu/\tpriority:2\n' "$mirror" > "$list"
+printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n%s\tpriority:2\n' "$mirror" > "$list"
 sed -i "0,/^URIs:/s|^URIs:.*|URIs: mirror+file:$list|" "$sources"
 EOF
 chmod +x /usr/local/sbin/apt-mirror-fallback
 
 cat <<'EOF' > /etc/systemd/system/apt-mirror-fallback.service
 [Unit]
-Description=Fall back to archive.ubuntu.com when the GCE apt mirror fails
+Description=Serve apt from archive.ubuntu.com with the GCE mirror as fallback
 After=cloud-config.service
 Before=google-startup-scripts.service
 
