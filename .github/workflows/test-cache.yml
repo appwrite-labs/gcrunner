@@ -24,7 +24,7 @@ jobs:
           cat test-cache-dir/data.txt
 
       - name: Save cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: test-cache-dir
           key: test-cache-${{ github.run_id }}
@@ -39,7 +39,7 @@ jobs:
         run: curl -sf http://localhost:8787/health
 
       - name: Restore cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: test-cache-dir
           key: test-cache-${{ github.run_id }}
@@ -71,7 +71,7 @@ jobs:
           npm install
 
       - name: Save node_modules cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: node_modules
           key: node-modules-${{ github.run_id }}
