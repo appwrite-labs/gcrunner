@@ -80,6 +80,11 @@ build {
     script          = "scripts/build/configure-apt-mock.sh"
   }
 
+  provisioner "file" {
+    source      = "scripts/build/apt-mirror-fallback.sh"
+    destination = "/tmp/apt-mirror-fallback.sh"
+  }
+
   provisioner "shell" {
     environment_vars = ["HELPER_SCRIPTS=${var.helper_script_folder}", "DEBIAN_FRONTEND=noninteractive"]
     execute_command  = "sudo sh -c '{{ .Vars }} {{ .Path }}'"
