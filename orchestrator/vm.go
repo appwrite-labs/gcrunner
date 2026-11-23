@@ -471,9 +471,8 @@ func findInstanceZone(ctx context.Context, name string) (string, error) {
 	defer client.Close()
 
 	it := client.AggregatedList(ctx, &computepb.AggregatedListInstancesRequest{
-		Project:              os.Getenv("GCP_PROJECT"),
-		Filter:               proto.String(fmt.Sprintf("name = %q", name)),
-		ReturnPartialSuccess: proto.Bool(true),
+		Project: os.Getenv("GCP_PROJECT"),
+		Filter:  proto.String(fmt.Sprintf("name = %q", name)),
 	})
 	for {
 		scope, err := it.Next()
@@ -510,9 +509,8 @@ func instancePreempted(ctx context.Context, name string, from, until time.Time) 
 	defer client.Close()
 
 	it := client.AggregatedList(ctx, &computepb.AggregatedListGlobalOperationsRequest{
-		Project:              os.Getenv("GCP_PROJECT"),
-		Filter:               proto.String(fmt.Sprintf("operationType = %q", preemptedOperation)),
-		ReturnPartialSuccess: proto.Bool(true),
+		Project: os.Getenv("GCP_PROJECT"),
+		Filter:  proto.String(fmt.Sprintf("operationType = %q", preemptedOperation)),
 	})
 	for {
 		scope, err := it.Next()
