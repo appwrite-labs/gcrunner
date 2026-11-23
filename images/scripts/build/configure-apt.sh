@@ -22,8 +22,7 @@ systemctl disable apt-daily-upgrade.service
 echo 'Acquire::Retries "1";' > /etc/apt/apt.conf.d/80-retries
 echo 'Acquire::http::Timeout "15";' > /etc/apt/apt.conf.d/80-timeout
 
-# cloud-init selects the regional mirror on first boot. Check the archive and
-# security mirrors after that selection and before the runner accepts a job.
+# cloud-init writes ubuntu.sources on each new instance; replace it before the runner starts.
 install -m 755 /tmp/apt-mirror-fallback.sh /usr/local/sbin/apt-mirror-fallback
 
 cat <<'EOF' > /etc/systemd/system/apt-mirror-fallback.service
