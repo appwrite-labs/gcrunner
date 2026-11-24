@@ -7,7 +7,7 @@ jobs:
   save-cache:
     runs-on: gcrunner=${{ github.run_id }}/machine=e2-medium
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check cache server is running
         run: curl -sf http://localhost:8787/health
@@ -33,7 +33,7 @@ jobs:
     needs: save-cache
     runs-on: gcrunner=${{ github.run_id }}-restore/machine=e2-medium
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check cache server is running
         run: curl -sf http://localhost:8787/health
@@ -53,7 +53,7 @@ jobs:
   test-setup-node:
     runs-on: gcrunner=${{ github.run_id }}-node/machine=e2-medium
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check cache server is running
         run: curl -sf http://localhost:8787/health
